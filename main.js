@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls';
-import { generateRooms } from './maze.js';
-import { findNextStep, isPositionInRoom, getRandomHallwayPosition } from './pathfinding.js';
+import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+import { generateRooms } from './js/maze.js';
+import { findNextStep, isPositionInRoom, getRandomHallwayPosition } from './js/pathfinding.js';
 
 const canvas = document.getElementById('c');
 
@@ -16,7 +16,7 @@ camera.position.set(0, 1.6, 0);
 const controls = new PointerLockControls(camera, canvas);
 
 // renderer and render mode state
-let renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+let renderer = new THREE.WebGLRenderer({ canvas });
 // RNG state
 let rng = Math.random;
 let seedStr = "";
@@ -173,7 +173,6 @@ let isMainMenu = true;
 // NEW: input buffer to prevent interaction during load
 let inputReady = false;
 // NEW: debug mode
-let debugNoCatch = false;
 let sweepImmunityUntil = 0;
 
 // --- Mod Menu Flags ---
@@ -600,10 +599,9 @@ canvas.addEventListener('touchend', (e) => {
   }
 }, { passive: false });
 
-
-
 // simple movement
 const move = { fwd: false, back: false, left: false, right: false, sprint: false };
+const MAX_SLOTS = 5;
 document.addEventListener('keydown', e => {
   if (isMainMenu && seedInputActive) return;
 
@@ -631,26 +629,12 @@ document.addEventListener('keydown', e => {
   // NEW: ignore movement/input when game over
   if (isGameOver || isGameWon) return;
 
-  // inventory slot selection with keys 1-3
-  if (e.code === 'Digit1') {
-    selectInventorySlot(0);
-    return;
-  }
-  if (e.code === 'Digit2') {
-    selectInventorySlot(1);
-    return;
-  }
-  if (e.code === 'Digit3') {
-    selectInventorySlot(2);
-    return;
-  }
-  if (e.code === 'Digit4') {
-    selectInventorySlot(3);
-    return;
-  }
-  if (e.code === 'Digit5') {
-    selectInventorySlot(4);
-    return;
+  // inventory slot selection with keys 1-5
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    if (e.code === 'Digit' + (i + 1)) {
+      selectInventorySlot(i);
+      return;
+    }
   }
 
   if (e.code === 'KeyW') move.fwd = true;
@@ -669,7 +653,7 @@ document.addEventListener('keyup', e => {
   if (e.code === 'Space') isLookingBehind = false;
 });
 
-const clock = new THREE.Clock();
+const clock = new THREE.Timer();
 
 // build maze
 const TILE = 3; // each grid cell is 3 units, making cells physically larger
@@ -759,18 +743,15 @@ function initGame() {
   // Generate Maze - read user-configured level generation settings from UI if present
   let genAttempts = 600;
   let genTargetRooms = 12;
-  let genWideChancePercent = null;
 
   try {
     const aEl = document.getElementById('levelAttemptsInput');
     const rEl = document.getElementById('levelRoomsInput');
-    const wEl = document.getElementById('levelWideChanceInput');
     const maxExEl = document.getElementById('levelMaxExitsInput');
     const corruptEl = document.getElementById('levelCorruptMazeChk');
 
     if (aEl) genAttempts = parseInt(aEl.value, 10);
     if (rEl) genTargetRooms = parseInt(rEl.value, 10);
-    if (wEl) genWideChancePercent = parseInt(wEl.value, 10);
     if (maxExEl) {
       genMaxExits = parseInt(maxExEl.value, 10);
       exitsNeeded = genMaxExits;
@@ -787,7 +768,6 @@ function initGame() {
     // fallback to defaults on any parsing error
     genAttempts = 600;
     genTargetRooms = 12;
-    genWideChancePercent = null;
     genMaxExits = 4;
     genCorruptMaze = false;
   }
@@ -806,11 +786,9 @@ function initGame() {
       // pass a single allowed room size derived from inputs
       roomSizesParam = [[sx, sz]];
     }
-  } catch (e) {
-    roomSizesParam = undefined;
-  }
+  } catch (e) { roomSizesParam = undefined; }
 
-  const result = generateRooms(GW, GH, roomSizesParam, genAttempts, genTargetRooms, rng);
+  const result = generateRooms(GW, GH, roomSizesParam, genAttempts, genTargetRooms);
   // If the generator returned blockedDoorEdges, keep them; otherwise default
   grid = result.grid;
   rooms = result.rooms;
@@ -825,9 +803,7 @@ function initGame() {
         if (!grid[y][x]) continue;
         // avoid corrupting room centers heavily: preserve tiles that are inside rooms
         if (isPositionInRoom(x, y, rooms)) continue;
-        if (rng() < 0.02) {
-          grid[y][x] = 0;
-        }
+        if (rng() < 0.02) grid[y][x] = 0;
       }
     }
     // After corruption, we don't rebuild rooms/doors here; collision creation will reflect the new grid.
@@ -894,8 +870,6 @@ function initGame() {
     const tex = textureLoader.load(texPath);
     tex.magFilter = THREE.NearestFilter;
     tex.minFilter = THREE.NearestFilter;
-    tex.wrapS = THREE.ClampToEdgeWrapping;
-    tex.wrapT = THREE.ClampToEdgeWrapping;
     const mat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
     const mesh = new THREE.Mesh(geom, mat);
     mesh.position.set(cx, wallHeight / 2, cz);
@@ -2174,9 +2148,7 @@ function placeEditorMarkerAtGrid(gx, gy, type) {
       exitGroup.add(mesh);
       exitStates.push({ mesh, collected: false });
     }
-  } catch (e) {
-    console.warn('Editor placement error:', e);
-  }
+  } catch (e) { console.warn('Editor placement error:', e); }
 }
 
 // helper: raycast center of screen to floor to get grid cell
@@ -2443,114 +2415,84 @@ roofTex.generateMipmaps = false;
 const notebookTex = textureLoader.load('./2025_12_09_0z4_Kleki (6).png');
 notebookTex.magFilter = THREE.NearestFilter;
 notebookTex.minFilter = THREE.NearestFilter;
-notebookTex.wrapS = THREE.ClampToEdgeWrapping;
-notebookTex.wrapT = THREE.ClampToEdgeWrapping;
 notebookTex.generateMipmaps = false;
 
 // enemy billboard texture
 const enemyTex = textureLoader.load('./itgetsbalder.png');
 enemyTex.magFilter = THREE.NearestFilter;
 enemyTex.minFilter = THREE.NearestFilter;
-enemyTex.wrapS = THREE.ClampToEdgeWrapping;
-enemyTex.wrapT = THREE.ClampToEdgeWrapping;
 enemyTex.generateMipmaps = false;
 
 // door textures
 const doorTex = textureLoader.load('./door.png');
 doorTex.magFilter = THREE.NearestFilter;
 doorTex.minFilter = THREE.NearestFilter;
-doorTex.wrapS = THREE.ClampToEdgeWrapping;
-doorTex.wrapT = THREE.ClampToEdgeWrapping;
 doorTex.generateMipmaps = false;
 
 const doorOpenedTex = textureLoader.load('./door_opened.png');
 doorOpenedTex.magFilter = THREE.NearestFilter;
 doorOpenedTex.minFilter = THREE.NearestFilter;
-doorOpenedTex.wrapS = THREE.ClampToEdgeWrapping;
-doorOpenedTex.wrapT = THREE.ClampToEdgeWrapping;
 doorOpenedTex.generateMipmaps = false;
 
 // NEW: poster textures for hallway walls
 const posterTex1 = textureLoader.load('./poster1.png');
 posterTex1.magFilter = THREE.NearestFilter;
 posterTex1.minFilter = THREE.NearestFilter;
-posterTex1.wrapS = THREE.ClampToEdgeWrapping;
-posterTex1.wrapT = THREE.ClampToEdgeWrapping;
 posterTex1.generateMipmaps = false;
 
 const posterTex2 = textureLoader.load('./poster2.png');
 posterTex2.magFilter = THREE.NearestFilter;
 posterTex2.minFilter = THREE.NearestFilter;
-posterTex2.wrapS = THREE.ClampToEdgeWrapping;
-posterTex2.wrapT = THREE.ClampToEdgeWrapping;
 posterTex2.generateMipmaps = false;
 
 const posterTex3 = textureLoader.load('./poster3.png');
 posterTex3.magFilter = THREE.NearestFilter;
 posterTex3.minFilter = THREE.NearestFilter;
-posterTex3.wrapS = THREE.ClampToEdgeWrapping;
-posterTex3.wrapT = THREE.ClampToEdgeWrapping;
 posterTex3.generateMipmaps = false;
 
 const posterTex4 = textureLoader.load('./poster4.png');
 posterTex4.magFilter = THREE.NearestFilter;
 posterTex4.minFilter = THREE.NearestFilter;
-posterTex4.wrapS = THREE.ClampToEdgeWrapping;
-posterTex4.wrapT = THREE.ClampToEdgeWrapping;
 posterTex4.generateMipmaps = false;
 
 const posterTex5 = textureLoader.load('./poster5.png');
 posterTex5.magFilter = THREE.NearestFilter;
 posterTex5.minFilter = THREE.NearestFilter;
-posterTex5.wrapS = THREE.ClampToEdgeWrapping;
-posterTex5.wrapT = THREE.ClampToEdgeWrapping;
 posterTex5.generateMipmaps = false;
 
 // NEW: poster 6 texture
 const posterTex6 = textureLoader.load('./poster6.png');
 posterTex6.magFilter = THREE.NearestFilter;
 posterTex6.minFilter = THREE.NearestFilter;
-posterTex6.wrapS = THREE.ClampToEdgeWrapping;
-posterTex6.wrapT = THREE.ClampToEdgeWrapping;
 posterTex6.generateMipmaps = false;
 
 // NEW: poster 7 texture
 const posterTex7 = textureLoader.load('./poster7.png');
 posterTex7.magFilter = THREE.NearestFilter;
 posterTex7.minFilter = THREE.NearestFilter;
-posterTex7.wrapS = THREE.ClampToEdgeWrapping;
-posterTex7.wrapT = THREE.ClampToEdgeWrapping;
 posterTex7.generateMipmaps = false;
 
 // NEW: poster 8 texture
 const posterTex8 = textureLoader.load('./poster8.png');
 posterTex8.magFilter = THREE.NearestFilter;
 posterTex8.minFilter = THREE.NearestFilter;
-posterTex8.wrapS = THREE.ClampToEdgeWrapping;
-posterTex8.wrapT = THREE.ClampToEdgeWrapping;
 posterTex8.generateMipmaps = false;
 
 // NEW: poster 9 texture
 const posterTex9 = textureLoader.load('./poster9.png');
 posterTex9.magFilter = THREE.NearestFilter;
 posterTex9.minFilter = THREE.NearestFilter;
-posterTex9.wrapS = THREE.ClampToEdgeWrapping;
-posterTex9.wrapT = THREE.ClampToEdgeWrapping;
 posterTex9.generateMipmaps = false;
 
 const oldBootsTex = textureLoader.load('./boots.png');
 oldBootsTex.magFilter = THREE.NearestFilter;
 oldBootsTex.minFilter = THREE.NearestFilter;
-oldBootsTex.wrapS = THREE.ClampToEdgeWrapping;
-oldBootsTex.wrapT = THREE.ClampToEdgeWrapping;
 oldBootsTex.generateMipmaps = false;
 
 // NEW: Sweep texture
 const sweepTex = textureLoader.load('./2025_12_14_0sd_Kleki (1).png');
 sweepTex.magFilter = THREE.NearestFilter;
 sweepTex.minFilter = THREE.NearestFilter;
-sweepTex.wrapS = THREE.ClampToEdgeWrapping;
-sweepTex.wrapT = THREE.ClampToEdgeWrapping;
 sweepTex.generateMipmaps = false;
 
 // NEW: array of poster materials used for random hallway wall posters
@@ -2610,15 +2552,11 @@ const posterMats = [
 const blueSodaTex = textureLoader.load('./dither_it_2025_12_10_0is_Kleki.png');
 blueSodaTex.magFilter = THREE.NearestFilter;
 blueSodaTex.minFilter = THREE.NearestFilter;
-blueSodaTex.wrapS = THREE.ClampToEdgeWrapping;
-blueSodaTex.wrapT = THREE.ClampToEdgeWrapping;
 blueSodaTex.generateMipmaps = false;
 
 const purpleChocolateTex = textureLoader.load('./2025_12_10_0kd_Kleki.png');
 purpleChocolateTex.magFilter = THREE.NearestFilter;
 purpleChocolateTex.minFilter = THREE.NearestFilter;
-purpleChocolateTex.wrapS = THREE.ClampToEdgeWrapping;
-purpleChocolateTex.wrapT = THREE.ClampToEdgeWrapping;
 purpleChocolateTex.generateMipmaps = false;
 
 // Preload DOM icon for purple chocolate
@@ -2642,8 +2580,6 @@ balderIcon.src = balderIconSrc;
 const walkieTalkieTex = textureLoader.load('./dither_it_2025_12_10_0lk_Kleki.png');
 walkieTalkieTex.magFilter = THREE.NearestFilter;
 walkieTalkieTex.minFilter = THREE.NearestFilter;
-walkieTalkieTex.wrapS = THREE.ClampToEdgeWrapping;
-walkieTalkieTex.wrapT = THREE.ClampToEdgeWrapping;
 walkieTalkieTex.generateMipmaps = false;
 
 const walkieTalkieIconSrc = './dither_it_2025_12_10_0lk_Kleki.png';
@@ -2653,8 +2589,6 @@ walkieTalkieIcon.src = walkieTalkieIconSrc;
 const wd40Tex = textureLoader.load('./fineButImGonnaUseApaintnetplugin.png');
 wd40Tex.magFilter = THREE.NearestFilter;
 wd40Tex.minFilter = THREE.NearestFilter;
-wd40Tex.wrapS = THREE.ClampToEdgeWrapping;
-wd40Tex.wrapT = THREE.ClampToEdgeWrapping;
 wd40Tex.generateMipmaps = false;
 
 const oldBootsIconSrc = './boots.png';
@@ -2673,8 +2607,6 @@ wd40Icon.src = wd40IconSrc;
 const splashTex = textureLoader.load('./2025_12_10_0iv_Kleki (1).png');
 splashTex.magFilter = THREE.NearestFilter;
 splashTex.minFilter = THREE.NearestFilter;
-splashTex.wrapS = THREE.ClampToEdgeWrapping;
-splashTex.wrapT = THREE.ClampToEdgeWrapping;
 splashTex.generateMipmaps = false;
 
 // NEW: exit textures
@@ -2795,29 +2727,21 @@ const oldBootsMat = new THREE.MeshStandardMaterial({
 const orangePointTex = textureLoader.load('./orange point.png');
 orangePointTex.magFilter = THREE.NearestFilter;
 orangePointTex.minFilter = THREE.NearestFilter;
-orangePointTex.wrapS = THREE.ClampToEdgeWrapping;
-orangePointTex.wrapT = THREE.ClampToEdgeWrapping;
 orangePointTex.generateMipmaps = false;
 
 const greenPointTex = textureLoader.load('./green point.png');
 greenPointTex.magFilter = THREE.NearestFilter;
 greenPointTex.minFilter = THREE.NearestFilter;
-greenPointTex.wrapS = THREE.ClampToEdgeWrapping;
-greenPointTex.wrapT = THREE.ClampToEdgeWrapping;
 greenPointTex.generateMipmaps = false;
 
 const pinkPointTex = textureLoader.load('./pink point.png');
 pinkPointTex.magFilter = THREE.NearestFilter;
 pinkPointTex.minFilter = THREE.NearestFilter;
-pinkPointTex.wrapS = THREE.ClampToEdgeWrapping;
-pinkPointTex.wrapT = THREE.ClampToEdgeWrapping;
 pinkPointTex.generateMipmaps = false;
 
 const megaPointTex = textureLoader.load('./mega point.png');
 megaPointTex.magFilter = THREE.NearestFilter;
 megaPointTex.minFilter = THREE.NearestFilter;
-megaPointTex.wrapS = THREE.ClampToEdgeWrapping;
-megaPointTex.wrapT = THREE.ClampToEdgeWrapping;
 megaPointTex.generateMipmaps = false;
 
 const orangePointMat = new THREE.MeshStandardMaterial({
@@ -2894,8 +2818,6 @@ scene.add(roofGroup);
 
 // colliders update
 const wallGroup = new THREE.Group();
-const wallThickness = 0.12;
-
 scene.add(wallGroup);
 
 // Precompute static bounding boxes for all colliders (walls don't move)
@@ -3044,7 +2966,6 @@ const npcStates = []; // { type, mesh, roomIndex, basePos, cooldown }
 
 // helper: send player to detention (principal behavior)
 let detentionActive = false;
-let detentionTimeout = null;
 function sendPlayerToDetention(durationSec = 15) {
   if (detentionActive) return;
   // find principal room center
@@ -3325,8 +3246,6 @@ function updateDebugVisuals() {
   while (debugGroup.children.length > 0) {
     debugGroup.remove(debugGroup.children[0]);
   }
-
-  if (!debugNoCatch) return;
 
   // Chaser Marker (Green)
   if (enemyMesh) {
@@ -4519,15 +4438,14 @@ function chaserCanSeePlayer() {
 // NEW: AI state machine logic
 function animate(time) {
   // convert rAF time (ms) to seconds
+  clock.update(time);
   const t = time * 0.001;
   const delta = t - lastFrameTime;
-  const now = clock.getElapsedTime();
+  const now = clock.getElapsed();
 
   // Ensure characters and schoolhouse loop are removed as soon as 2+ notebooks exist,
   // but only while in a running game (not while the main menu is shown).
-  if (!isMainMenu) {
-    enforceTwoNotebookRule();
-  }
+  if (!isMainMenu) enforceTwoNotebookRule();
 
   // if main menu, skip logic
   if (isMainMenu) {
@@ -4982,13 +4900,7 @@ function animate(time) {
     }
 
     if (validCatch) {
-      // If mod invincible is enabled, skip the catch sequence
-      if (modInvincible) {
-        // push player back slightly as a mild feedback but don't trigger game over
-        const back = new THREE.Vector3().subVectors(controls.getObject().position, enemyMesh.position).setY(0).normalize().multiplyScalar(0.4);
-        const tryPos = controls.getObject().position.clone().add(back);
-        if (!collides(tryPos)) controls.getObject().position.copy(tryPos);
-      } else if (!debugNoCatch && !hasResetOnCatch) {
+      if (!modInvincible && !hasResetOnCatch) {
         hasResetOnCatch = true;
         isGameOver = true;
         isJumpScare = true;
@@ -5808,11 +5720,6 @@ function animate(time) {
   const canSprint = isSpeedBoostActive || currentStamina > 0;
   const effectiveSprint = move.sprint && canSprint;
 
-  const sprintMultiplier = effectiveSprint ? 2.2 : 1.0;
-  const speedBoostMultiplier = isSpeedBoostActive ? 2.0 : 1.0; // Stacks multiplicatively? Or handled? 
-  // Original code: speed = baseSpeed * sprintMultiplier * speedBoostMultiplier
-  // If boosted, speed is high AND stamina is infinite.
-
   // apply modSuperSpeed multiplier if enabled
   const modSpeedMult = modSuperSpeed ? 2.25 : 1.0;
   const speed = baseSpeed * (effectiveSprint ? 2.2 : 1.0) * (isSpeedBoostActive ? 1.5 : 1.0) * modSpeedMult;
@@ -5940,9 +5847,7 @@ function updateChaseMusic(playerPos, enemyPos) {
   if (chaseMusic.paused) {
     try {
       chaseMusic.play();
-    } catch (e) {
-      // ignore autoplay errors
-    }
+    } catch { }
   }
 }
 
@@ -6031,7 +5936,6 @@ function collectLevelSettings() {
   try {
     const aEl = document.getElementById('levelAttemptsInput');
     const rEl = document.getElementById('levelRoomsInput');
-    const wEl = document.getElementById('levelWideChanceInput');
     const sxEl = document.getElementById('roomSizeXInput');
     const szEl = document.getElementById('roomSizeZInput');
     const maxExEl = document.getElementById('levelMaxExitsInput');
@@ -6042,7 +5946,6 @@ function collectLevelSettings() {
     return {
       attempts: aEl ? parseInt(aEl.value, 10) : 600,
       targetRooms: rEl ? parseInt(rEl.value, 10) : 12,
-      wideChancePercent: wEl ? parseInt(wEl.value, 10) : null,
       roomSizeX: sxEl ? parseInt(sxEl.value, 10) : null,
       roomSizeZ: szEl ? parseInt(szEl.value, 10) : null,
       maxExits: maxExEl ? parseInt(maxExEl.value, 10) : 4,
@@ -6050,9 +5953,7 @@ function collectLevelSettings() {
       corruptMaze: corruptEl ? !!corruptEl.checked : false,
       startFloor: startFloorEl ? parseInt(startFloorEl.value, 10) : 1
     };
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 function applyLevelSettings(settings) {
@@ -6060,7 +5961,6 @@ function applyLevelSettings(settings) {
   try {
     const aEl = document.getElementById('levelAttemptsInput');
     const rEl = document.getElementById('levelRoomsInput');
-    const wEl = document.getElementById('levelWideChanceInput');
     const sxEl = document.getElementById('roomSizeXInput');
     const szEl = document.getElementById('roomSizeZInput');
     const maxExEl = document.getElementById('levelMaxExitsInput');
@@ -6070,16 +5970,13 @@ function applyLevelSettings(settings) {
 
     if (aEl && Number.isFinite(settings.attempts)) aEl.value = settings.attempts;
     if (rEl && Number.isFinite(settings.targetRooms)) rEl.value = settings.targetRooms;
-    if (wEl && Number.isFinite(settings.wideChancePercent)) wEl.value = settings.wideChancePercent;
     if (sxEl && Number.isFinite(settings.roomSizeX)) sxEl.value = settings.roomSizeX;
     if (szEl && Number.isFinite(settings.roomSizeZ)) szEl.value = settings.roomSizeZ;
     if (maxExEl && Number.isFinite(settings.maxExits)) maxExEl.value = settings.maxExits;
     if (maxFloorsEl && Number.isFinite(settings.maxFloors)) maxFloorsEl.value = settings.maxFloors;
     if (corruptEl) corruptEl.checked = !!settings.corruptMaze;
     if (startFloorEl && Number.isFinite(settings.startFloor)) startFloorEl.value = settings.startFloor;
-  } catch (e) {
-    console.warn('applyLevelSettings failed:', e);
-  }
+  } catch (e) { console.warn('applyLevelSettings failed:', e); }
 }
 
 function setupLevelSettingsSaveLoad() {

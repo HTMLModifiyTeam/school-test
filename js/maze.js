@@ -1,15 +1,13 @@
-/*
-Maze generator that places rectangular rooms of allowed sizes on a grid.
-Exports: generateRooms(gridW,gridH,roomSizes,count)
-Result: {grid, rooms, doors}
-- grid: 2D array marking tiles: 0 empty, 1 floor
-- rooms: array of {x,y,w,h}
-- doors: array of {x,y,dir,roomA,roomB}
-*/
-export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5], [3, 5]], attempts = 400, targetRooms = 20, rng = Math.random) {
+import { rand, isPositionInRoom } from "./utils";
+
+/**
+ * Maze generator that places rectangular rooms of allowed sizes on a grid.
+ * @exports generateRooms(gridW,gridH,roomSizes,count)
+ * @returns {{grid, rooms, doors}|null} - Rooms data or null
+ */
+export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5], [3, 5]], attempts = 400, targetRooms = 20) {
   const grid = Array.from({ length: gridH }, () => Array(gridW).fill(0));
   const rooms = [];
-  const rand = (a, b) => Math.floor(rng() * (b - a + 1)) + a;
 
   // helper to test overlap with padding so rooms are not too close to each other
   const ROOM_PADDING = 2; // tiles of empty space around each room
@@ -26,7 +24,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
   // place rooms randomly across the map (within padding) instead of biasing to edges
   let placed = 0;
   for (let t = 0; t < attempts && placed < targetRooms; t++) {
-    const [rw, rh] = roomSizes[Math.floor(rng() * roomSizes.length)];
+    const [rw, rh] = roomSizes[Math.floor(Math.random() * roomSizes.length)];
 
     const minX = ROOM_PADDING;
     const maxX = gridW - rw - ROOM_PADDING;
@@ -47,11 +45,6 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
   // If no rooms, return early
   if (rooms.length === 0) return { grid, rooms, doors: [] };
 
-  // helper to know if a tile belongs to a room
-  function roomAt(i, j) {
-    return rooms.find(r => i >= r.x && i < r.x + r.w && j >= r.y && j < r.y + r.h);
-  }
-
   // For each room, pick a single perimeter "anchor" tile just outside its wall,
   // carve it into a corridor tile, and store it on the room.
   const anchors = [];
@@ -62,33 +55,25 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
     for (let dx = 0; dx < r.w; dx++) {
       const rx = r.x + dx;
       const ry = r.y - 1;
-      if (ry >= 0 && grid[ry][rx] === 0) {
-        candidates.push({ x: rx, y: ry });
-      }
+      if (ry >= 0 && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
     }
     // bottom edge neighbors
     for (let dx = 0; dx < r.w; dx++) {
       const rx = r.x + dx;
       const ry = r.y + r.h;
-      if (ry < gridH && grid[ry][rx] === 0) {
-        candidates.push({ x: rx, y: ry });
-      }
+      if (ry < gridH && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
     }
     // left edge neighbors
     for (let dy = 0; dy < r.h; dy++) {
       const ry = r.y + dy;
       const rx = r.x - 1;
-      if (rx >= 0 && grid[ry][rx] === 0) {
-        candidates.push({ x: rx, y: ry });
-      }
+      if (rx >= 0 && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
     }
     // right edge neighbors
     for (let dy = 0; dy < r.h; dy++) {
       const ry = r.y + dy;
       const rx = r.x + r.w;
-      if (rx < gridW && grid[ry][rx] === 0) {
-        candidates.push({ x: rx, y: ry });
-      }
+      if (rx < gridW && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
     }
 
     if (candidates.length) {
@@ -116,8 +101,8 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
 
     // Decide once per corridor if it should be widened to 2 cells,
     // and on which side to widen.
-    const widen = rng() < 0.5; // Increased chance for wide hallways
-    const side = rng() < 0.5 ? -1 : 1;
+    const widen = Math.random() < 0.5; // Increased chance for wide hallways
+    const side = Math.random() < 0.5 ? -1 : 1;
 
     function carveCell(cx, cy, dir) {
       if (cx < 0 || cx >= gridW || cy < 0 || cy >= gridH) return;
@@ -143,9 +128,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
     // carve starting cell without a direction
     carveCell(x, y, null);
 
-    const horizontalFirst = rng() < 0.5;
-
-    if (horizontalFirst) {
+    if (Math.random() < 0.5) { // horizontalFirst
       // move horizontally first, then vertically
       const stepX = x2 > x ? 1 : -1;
       while (x !== x2) {
@@ -183,7 +166,6 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
   // so each room has a single connection into the corridor network,
   // and nearby rooms are preferred (keeping corridors shorter).
   const roomAnchors = rooms.map(r => ({ room: r, x: r.anchor.x, y: r.anchor.y }));
-
   if (roomAnchors.length > 1) {
     const connected = new Set();
     const remaining = new Set();
@@ -254,8 +236,8 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
   }
 
   // Shuffle segments and connect distant pairs (> 9 cells) to create shortcuts
-  const extraLinks = Math.floor(rng() * 4) + 4;
-  longSegments.sort(() => rng() - 0.5);
+  const extraLinks = Math.floor(Math.random() * 4) + 4;
+  longSegments.sort(() => Math.random() - 0.5);
 
   let linksAdded = 0;
   for (let i = 0; i < longSegments.length; i++) {
@@ -291,10 +273,10 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
     for (let x = 1; x < gridW - 1; x++) {
       if (grid[y][x] !== 0) continue; // must be a wall currently
 
-      const nRoom = roomAt(x, y - 1);
-      const sRoom = roomAt(x, y + 1);
-      const wRoom = roomAt(x - 1, y);
-      const eRoom = roomAt(x + 1, y);
+      const nRoom = isPositionInRoom(x, y - 1, rooms);
+      const sRoom = isPositionInRoom(x, y + 1, rooms);
+      const wRoom = isPositionInRoom(x - 1, y, rooms);
+      const eRoom = isPositionInRoom(x + 1, y, rooms);
 
       const nHall = grid[y - 1][x] && !nRoom;
       const sHall = grid[y + 1][x] && !sRoom;
@@ -314,10 +296,10 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
 
   // Shuffle and pick 1-2 candidates to carve
   if (extraConnectionCandidates.length) {
-    const numExtra = Math.floor(rng() * 2) + 1;
+    const numExtra = Math.floor(Math.random() * 2) + 1;
     for (let i = 0; i < numExtra; i++) {
       if (!extraConnectionCandidates.length) break;
-      const idx = Math.floor(rng() * extraConnectionCandidates.length);
+      const idx = Math.floor(Math.random() * extraConnectionCandidates.length);
       const p = extraConnectionCandidates[idx];
       grid[p.y][p.x] = 1; // carve path
       extraConnectionCandidates.splice(idx, 1);
@@ -329,7 +311,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
     for (let x = 0; x < gridW; x++) {
       if (!grid[y][x]) continue;
       // skip tiles that belong to a room
-      if (roomAt(x, y)) continue;
+      if (isPositionInRoom(x, y, rooms)) continue;
 
       let neighbors = 0;
       const dirs = [
@@ -368,7 +350,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
       if (yOutside >= 0) {
         for (let x = r.x; x < r.x + r.w; x++) {
           if (!grid[yInside][x]) continue;
-          if (grid[yOutside][x] && !roomAt(x, yOutside)) {
+          if (grid[yOutside][x] && !isPositionInRoom(x, yOutside, rooms)) {
             candidates.push({ x, y: yInside, dir: 'N' });
           }
         }
@@ -382,7 +364,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
       if (yOutside < gridH) {
         for (let x = r.x; x < r.x + r.w; x++) {
           if (!grid[yInside][x]) continue;
-          if (grid[yOutside][x] && !roomAt(x, yOutside)) {
+          if (grid[yOutside][x] && !isPositionInRoom(x, yOutside, rooms)) {
             candidates.push({ x, y: yInside, dir: 'S' });
           }
         }
@@ -396,7 +378,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
       if (xOutside >= 0) {
         for (let y = r.y; y < r.y + r.h; y++) {
           if (!grid[y][xInside]) continue;
-          if (grid[y][xOutside] && !roomAt(xOutside, y)) {
+          if (grid[y][xOutside] && !isPositionInRoom(xOutside, y, rooms)) {
             candidates.push({ x: xInside, y, dir: 'W' });
           }
         }
@@ -410,7 +392,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
       if (xOutside < gridW) {
         for (let y = r.y; y < r.y + r.h; y++) {
           if (!grid[y][xInside]) continue;
-          if (grid[y][xOutside] && !roomAt(xOutside, y)) {
+          if (grid[y][xOutside] && !isPositionInRoom(xOutside, y, rooms)) {
             candidates.push({ x: xInside, y, dir: 'E' });
           }
         }
@@ -504,7 +486,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
         const ny = y + dy;
         if (grid[ny][nx] !== 0) {
           // neighbor is floor. Is it a room?
-          if (roomAt(nx, ny)) {
+          if (isPositionInRoom(nx, ny, rooms)) {
             isValid = false; // Don't attach to a room directly
             break;
           }
@@ -518,7 +500,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
   }
 
   if (candidates.length > 0) {
-    const choice = candidates[Math.floor(rng() * candidates.length)];
+    const choice = candidates[Math.floor(Math.random() * candidates.length)];
     grid[choice.y][choice.x] = 1;
     specialRoom = { x: choice.x, y: choice.y, w: 1, h: 1 };
 
@@ -533,7 +515,7 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
       const nx = choice.x + d.dx;
       const ny = choice.y + d.dy;
       // Neighbor must be floor and not a room (hallway)
-      if (grid[ny][nx] && !roomAt(nx, ny)) {
+      if (grid[ny][nx] && !isPositionInRoom(nx, ny, rooms)) {
         doors.push({
           x: choice.x,
           y: choice.y,

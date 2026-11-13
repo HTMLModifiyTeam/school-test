@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Rooms Maze</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://threejs.org/build/three.module.js",
+      "PointerLockControls": "https://threejs.org/examples/jsm/controls/PointerLockControls.js"
+    }
+  }
+  </script>
+
+  <!-- Preload key image and audio assets -->
+  <link rel="preload" as="image" href="./images.png">
+  <link rel="preload" as="image" href="./2025_12_09_0ys_Kleki.png">
+  <link rel="preload" as="image" href="./2025_12_09_0yv_Kleki.png">
+  <link rel="preload" as="image" href="./2025_12_09_0z4_Kleki (6).png">
+  <link rel="preload" as="image" href="./door.png">
+  <link rel="preload" as="image" href="./door_opened.png">
+  <link rel="preload" as="image" href="./thumn.png">
+  <link rel="preload" as="image" href="./wuhohhh (1).png">
+  <link rel="preload" as="image" href="./itgetsbalder.png">
+  <link rel="preload" as="image" href="./dither_it_2025_12_10_0is_Kleki.png">
+  <link rel="preload" as="image" href="./2025_12_10_0iv_Kleki (1).png">
+  <link rel="preload" as="image" href="./dither_it_2025_12_10_0lk_Kleki.png">
+  <link rel="preload" as="image" href="./fineButImGonnaUseApaintnetplugin.png">
+  <link rel="preload" as="image" href="./Sparkle.webp">
+  <link rel="preload" as="image" href="./Baldicator_Look.webp">
+  <link rel="preload" as="image" href="./Baldicator_Think.webp">
+  <link rel="preload" as="image" href="./poster7.png">
+  <link rel="preload" as="image" href="./poster8.png">
+  <link rel="preload" as="image" href="./poster9.png">
+  <link rel="preload" as="image" href="./boots.png">
+  <!-- NEW: Sweep assets -->
+  <link rel="preload" as="image" href="./2025_12_14_0sd_Kleki (1).png">
+  <link rel="preload" as="audio" href="./35f37130-9444-4e22-bbe3-982795157c9a.wav">
+
+  <link rel="preload" as="audio" href="./room-with-buzz-incandescent-light-bulb-23892.mp3">
+  <link rel="preload" as="audio" href="./GAHHH.wav">
+  <link rel="preload" as="audio" href="./ItReallyGetsBalder.wav">
+  <link rel="preload" as="audio" href="./paper-rustle-81855.mp3">
+  <link rel="preload" as="audio" href="./bbbbb.wav">
+  <link rel="preload" as="audio" href="./door-opening-397990.mp3">
+  <link rel="preload" as="audio" href="./close-door-382723.mp3">
+  <link rel="preload" as="audio" href="./soda-can-open-183214.mp3">
+  <link rel="preload" as="audio" href="./wind_howling_02-78263.mp3">
+  <link rel="preload" as="audio" href="./plastic-crunch-83779.mp3">
+  <link rel="preload" as="audio" href="./beep-329314.mp3">
+  <link rel="preload" as="audio" href="./AAAAAAAAAAAAAAAAAAH.wav">
+  <link rel="preload" as="audio" href="./spray-bottle-36050.mp3">
+</head>
+
+<body>
+  <canvas id="c"></canvas>
+  <canvas id="minimap" width="240" height="240"></canvas>
+  <img id="watermark" src="./images.png" alt="Unregistered HyperCam 2 watermark">
+  <div id="notebookCounter"></div>
+
+  <!-- Points HUD: bottom-center main label + floating earned text -->
+  <div id="pointsContainer" aria-live="polite" style="display:block;">
+    <div id="pointsFloating" class="points-floating" aria-hidden="true"></div>
+    <div id="pointsMain" class="points-main">points: 0</div>
+  </div>
+  <div id="seedDisplay"></div>
+  <div id="difficultyDisplay"></div>
+  <div id="floorDisplay"></div>
+  <div id="fpsDisplay">fps: 0</div>
+  <div id="restartConfirm">are you sure? press r to restart</div>
+  <!-- pause overlay -->
+  <div id="pauseOverlay">
+    <div>paused</div>
+    <button id="pauseRestartBtn">restart</button>
+  </div>
+  <!-- win overlay -->
+  <div id="winOverlay">
+    <img id="winImage" src="./Winner.png" alt="Win Screen">
+  </div>
+  <!-- NEW: Crosshair -->
+  <div id="crosshair">+</div>
+  <!-- NEW: Stamina Bar -->
+  <div id="staminaContainer">
+    <div id="staminaBar"></div>
+  </div>
+  <!-- main menu -->
+  <div id="mainMenu">
+    <img src="./thumn.png" alt="Main Menu">
+    <div id="difficultyUI">difficulty: normal</div>
+    <div id="seedUI">seed: </div>
+
+    <!-- Level generation settings -->
+    <div id="levelSettings"
+      style="position: absolute; left: 25px; top: 50%; z-index:220; color:#000; font-family:TimesNewRoman, serif; transform: translateY(-50%) scale(1.1);">
+      <div style="margin-bottom:6px; font-size:14px;">level generation</div>
+      <label style="display:block; margin-bottom:4px;">
+        Attempts:
+        <input id="levelAttemptsInput" type="number" min="50" max="2000" step="10" value="800"
+          style="width:86px; margin-left:8px;" />
+      </label>
+      <label style="display:block; margin-bottom:4px;">
+        Target rooms:
+        <input id="levelRoomsInput" type="number" min="3" max="120" step="1" value="12"
+          style="width:86px; margin-left:8px;" />
+      </label>
+      <label style="display:block; margin-bottom:4px;">
+        Wide corridor chance:
+        <input id="levelWideChanceInput" type="number" min="0" max="100" step="5" value="50"
+          style="width:86px; margin-left:8px;" /> %
+      </label>
+      <label style="display:block; margin-top:6px;">
+        Start floor:
+        <select id="levelStartFloorSelect" style="width:100px; margin-left:8px;">
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+        </select>
+      </label>
+      <label style="display:block; margin-top:6px;">
+        Modify Room Size X:
+        <input id="roomSizeXInput" type="number" min="1" max="20" step="1" value="5"
+          style="width:86px; margin-left:8px;" />
+      </label>
+      <label style="display:block; margin-top:4px;">
+        Modify Room Size Z:
+        <input id="roomSizeZInput" type="number" min="1" max="20" step="1" value="4"
+          style="width:86px; margin-left:8px;" />
+      </label>
+
+      <!-- NEW: Corrupt Maze / Max Exits / Bypass Notebook Limit / Bypass Elevator -->
+      <label style="display:block; margin-top:8px;">
+        Max exits:
+        <input id="levelMaxExitsInput" type="number" min="1" max="12" step="1" value="4"
+          style="width:86px; margin-left:8px;" />
+      </label>
+
+      <!-- NEW: Max floors for level generation -->
+      <label style="display:block; margin-top:6px;">
+        Max floors:
+        <input id="levelMaxFloorsInput" type="number" min="1" max="20" step="1" value="5"
+          style="width:86px; margin-left:8px;" />
+      </label>
+
+      <label style="display:block; margin-top:6px; gap:8px; align-items:center;">
+        <input id="levelCorruptMazeChk" type="checkbox" /> Corrupt maze (random holes)
+      </label>
+
+      <!-- NEW: Spawn Other Characters (excluding principal) -->
+      <label style="display:block; margin-top:6px; gap:8px; align-items:center;">
+        <input id="spawnOtherCharChk" type="checkbox" checked /> Spawn other characters
+      </label>
+
+      <!-- NEW: Save / Load level generation settings -->
+      <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+        <button id="saveLevelSettingsBtn"
+          style="padding:6px; border:1px solid #666; background:transparent; color:#000; cursor:pointer;">Save level
+          settings</button>
+        <button id="loadLevelSettingsBtn"
+          style="padding:6px; border:1px solid #666; background:transparent; color:#000; cursor:pointer;">Load
+          settings</button>
+        <input id="levelSettingsFileInput" type="file" accept="application/json" style="display:none" />
+      </div>
+    </div>
+
+    <button id="showInfoToggleButton">enable info display</button>
+    <button id="playButton">play</button>
+    <button id="levelEditorButton"
+      style="position: absolute; bottom: 22%; left: 40%; z-index: 210; background: transparent; border: none; color: #000; font-family: 'Times New Roman', serif; font-size: 20px; transform: scale(1.6); cursor: pointer; padding:6px; text-transform: lowercase;">level
+      editor</button>
+    <button id="modeToggleButton">switch to hd</button>
+    <button id="loudnessToggleButton">disable loudness</button>
+    <button id="peacefulModeButton">peaceful: off</button>
+    <!-- Hidden input for mobile seed entry -->
+    <input id="seedInputHidden" type="text"
+      style="position: absolute; opacity: 0; pointer-events: none; z-index: -1;" />
+  </div>
+
+  <!-- Mod Menu (toggle with backtick ` ) -->
+  <div id="modMenu"
+    style="display:none; position:fixed; left:12px; top:12px; z-index:500; background:rgba(0,0,0,0.85); color:#fff; padding:10px; border:1px solid #666; font-family:TimesNewRoman, serif; transform:scale(1.2);">
+    <div style="font-size:16px; margin-bottom:8px;">mod menu</div>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modInvincible" /> god
+      mode</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modSuperSpeed" /> super
+      speed</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modInfItems" /> inf
+      items</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modInfStamina" /> inf
+      stamina</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modBaldiIcon" /> baldi icon on
+      minimap</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modPrincipalIgnore" />
+      Principal ignores player</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modBullyNoSteal" /> Bully
+      ignores player</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modNoclip" /> noclip</label>
+    <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modAutoplay" /> autoplay
+      (experimental)</label>
+
+    <!-- NEW: Item spawn controls -->
+    <div style="margin-top:8px; display:flex; gap:6px; align-items:center;">
+      <select id="modItemSelect"
+        style="background:rgba(255,255,255,0.06); color:#fff; border:1px solid #444; padding:4px;">
+        <option value="blue_soda">Blue Soda</option>
+        <option value="purple_chocolate">Purple Chocolate</option>
+        <option value="walkie_talkie">Walkie Talkie</option>
+        <option value="wd40">WD40</option>
+        <option value="old_boots">Old Boots</option>
+        <option value="point_orange">Point (Orange)</option>
+        <option value="point_green">Point (Green)</option>
+        <option value="point_pink">Point (Pink)</option>
+        <option value="point_mega">Point (Mega)</option>
+      </select>
+      <button id="modGetItemBtn"
+        style="padding:4px 8px; border:1px solid #666; background:transparent; color:#fff; cursor:pointer;">get
+        item</button>
+    </div>
+
+    <!-- NEW: Utility buttons -->
+    <div style="margin-top:8px; display:flex; gap:6px; flex-direction:column;">
+      <button id="modTpNotebooksBtn"
+        style="padding:6px; border:1px solid #666; background:transparent; color:#fff; cursor:pointer;">tp notebooks to
+        player</button>
+      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modNoDarkBtn" /> Full
+        Bright</label>
+      <button id="modNextLevelBtn"
+        style="padding:6px; border:1px solid #666; background:transparent; color:#fff; cursor:pointer;">next
+        level</button>
+    </div>
+
+    <div style="font-size:12px; opacity:0.8; margin-top:8px;">toggle with ` (backtick)</div>
+  </div>
+
+  <!-- inventory hud -->
+  <div id="inventory">
+    <div id="useItemButton" class="inv-slot" style="display: none;">USE</div>
+    <div class="inv-slot" data-slot="0"><img class="inv-icon" /></div>
+    <div class="inv-slot" data-slot="1"><img class="inv-icon" /></div>
+    <div class="inv-slot" data-slot="2"><img class="inv-icon" /></div>
+    <div class="inv-slot" data-slot="3"><img class="inv-icon" /></div>
+    <div class="inv-slot" data-slot="4"><img class="inv-icon" /></div>
+  </div>
+  <img id="baldicator" src="" alt="Baldicator">
+  <!-- mobile pause button -->
+  <button id="pauseButton" aria-label="Pause"></button>
+  <!-- NEW: look behind button for mobile -->
+  <button id="lookBehindButton" aria-label="Look Behind">↻</button>
+  <!-- mobile joystick -->
+  <div id="joystick">
+    <div id="joystick-base"></div>
+    <div id="joystick-stick"></div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+
+</html>

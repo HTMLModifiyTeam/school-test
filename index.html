@@ -9,36 +9,11 @@
     {
       "imports": {
         "three": "https://threejs.org/build/three.module.js",
-        "PointerLockControls": "https://threejs.org/examples/jsm/controls/PointerLockControls.js"
+        "three/examples/jsm/controls/PointerLockControls.js": "https://threejs.org/examples/jsm/controls/PointerLockControls.js"
       }
     }
     </script>
-
-    <!-- Preload key image and audio assets -->
-    <link rel="preload" as="image" href="./images.png">
-    <link rel="preload" as="image" href="./2025_12_09_0ys_Kleki.png">
-    <link rel="preload" as="image" href="./2025_12_09_0yv_Kleki.png">
-    <link rel="preload" as="image" href="./2025_12_09_0z4_Kleki (6).png">
-    <link rel="preload" as="image" href="./door.png">
-    <link rel="preload" as="image" href="./door_opened.png">
-    <link rel="preload" as="image" href="./thumn.png">
-    <link rel="preload" as="image" href="./wuhohhh (1).png">
-    <link rel="preload" as="image" href="./itgetsbalder.png">
-    <link rel="preload" as="image" href="./dither_it_2025_12_10_0is_Kleki.png">
-    <link rel="preload" as="image" href="./2025_12_10_0iv_Kleki (1).png">
-    <link rel="preload" as="image" href="./dither_it_2025_12_10_0lk_Kleki.png">
-    <link rel="preload" as="image" href="./fineButImGonnaUseApaintnetplugin.png">
-    <link rel="preload" as="image" href="./Sparkle.webp">
-    <link rel="preload" as="image" href="./Baldicator_Look.webp">
-    <link rel="preload" as="image" href="./Baldicator_Think.webp">
-    <link rel="preload" as="image" href="./poster7.png">
-    <link rel="preload" as="image" href="./poster8.png">
-    <link rel="preload" as="image" href="./poster9.png">
-    <link rel="preload" as="image" href="./boots.png">
-    <!-- NEW: Sweep assets -->
-    <link rel="preload" as="image" href="./2025_12_14_0sd_Kleki (1).png">
     <link rel="preload" as="audio" href="./35f37130-9444-4e22-bbe3-982795157c9a.wav">
-
     <link rel="preload" as="audio" href="./room-with-buzz-incandescent-light-bulb-23892.mp3">
     <link rel="preload" as="audio" href="./GAHHH.wav">
     <link rel="preload" as="audio" href="./ItReallyGetsBalder.wav">
@@ -57,7 +32,7 @@
   <body>
     <canvas id="c"></canvas>
     <canvas id="minimap" width="240" height="240"></canvas>
-    <img id="watermark" src="./images.png" alt="Unregistered HyperCam 2 watermark">
+    <img id="watermark" src="./assets/img/watermark.png" alt="Unregistered HyperCam 2 watermark">
     <div id="notebookCounter"></div>
 
     <!-- Points HUD: bottom-center main label + floating earned text -->
@@ -77,7 +52,7 @@
     </div>
     <!-- win overlay -->
     <div id="winOverlay">
-      <img id="winImage" src="./Winner.png" alt="Win Screen">
+      <img id="winImage" src="./assets/img/Winner.png" alt="Win Screen">
     </div>
     <!-- NEW: Crosshair -->
     <div id="crosshair">+</div>
@@ -87,7 +62,7 @@
     </div>
     <!-- main menu -->
     <div id="mainMenu">
-      <img src="./thumn.png" alt="Main Menu">
+      <img src="./assets/img/thumb.png" alt="Main Menu">
       <div id="difficultyUI">difficulty: normal</div>
       <div id="seedUI">seed: </div>
 

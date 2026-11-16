@@ -1,3 +1,5 @@
+import { isPositionInRoom } from './utils.js';
+
 /**
  * Picks a random position on the grid that corresponds to a hallway (floor but not in a room).
  * @param {Array<Array<number>>} grid - The maze grid
@@ -49,18 +51,11 @@ export function findNextStep(startX, startY, goalX, goalY, grid, width, height, 
 
   if (!isWalkable(goalX, goalY)) return null;
 
-  const queue = [];
   const visited = new Array(height);
-  const dirs = [
-    { dx: 1, dy: 0 },
-    { dx: -1, dy: 0 },
-    { dx: 0, dy: 1 },
-    { dx: 0, dy: -1 }
-  ];
-
+  
   for (let y = 0; y < height; y++) visited[y] = new Array(width).fill(false);
-
-  queue.push({ x: startX, y: startY });
+  
+  const queue = [{ x: startX, y: startY }];
   visited[startY][startX] = true;
 
   const parent = new Map();
@@ -80,7 +75,7 @@ export function findNextStep(startX, startY, goalX, goalY, grid, width, height, 
       return last;
     }
 
-    for (const d of dirs) {
+    for (const d of [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }]) {
       const nx = cur.x + d.dx;
       const ny = cur.y + d.dy;
       if (!isWalkable(nx, ny)) continue;

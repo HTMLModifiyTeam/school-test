@@ -1,9 +1,17 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { generateRooms } from './js/maze.js';
-import { findNextStep, isPositionInRoom, getRandomHallwayPosition } from './js/pathfinding.js';
+import { findNextStep, getRandomHallwayPosition } from './js/pathfinding.js';
+import { isPositionInRoom, pointTex } from './js/utils.js';
+import { ImageCache } from './js/cache.js';
+import { IMG_CACHE } from './js/data.js';
 
 const canvas = document.getElementById('c');
+
+// Caching Image and Audio.
+const images = new ImageCache(IMG_CACHE, { root: 'assets/img' });
+const CACHED_IMG = await images.load();
+console.log(CACHED_IMG);
 
 // Scene, camera, and controls must exist before we configure the renderer
 const scene = new THREE.Scene();
@@ -170,6 +178,9 @@ const pausedLook = new THREE.Euler();
 let isGameOver = false;
 let isGameWon = false;
 let isMainMenu = true;
+
+let detentionTimeout;
+
 // NEW: input buffer to prevent interaction during load
 let inputReady = false;
 // NEW: debug mode
@@ -270,7 +281,7 @@ function setupModMenuBindings() {
     const size = 0.8;
     const geom = new THREE.PlaneGeometry(size, size);
     const mesh = new THREE.Mesh(geom, mat);
-    const playerPos = controls.getObject().position.clone();
+    const playerPos = controls.object.position.clone();
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
     dir.y = 0;
@@ -295,7 +306,7 @@ function setupModMenuBindings() {
   if (tpNotebooksBtn) {
     tpNotebooksBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const p = controls.getObject().position.clone();
+      const p = controls.object.position.clone();
       let offset = 0;
       for (const nb of notebookStates) {
         if (!nb) continue;
@@ -1251,7 +1262,7 @@ function initGame() {
       }
     }
 
-    controls.getObject().position.set(sx, 1.6, sz);
+    controls.object.position.set(sx, 1.6, sz);
   }
 
   // Spawn Enemy
@@ -1316,7 +1327,7 @@ function initGame() {
     // place player slightly in front of the exit face into the hallway
     const sx = exPos.x - fx * 1.2;
     const sz = exPos.z - fz * 1.2;
-    controls.getObject().position.set(sx, 1.6, sz);
+    controls.object.position.set(sx, 1.6, sz);
   }
 
   // Update Info UI
@@ -1406,7 +1417,7 @@ function spawnSweep() {
   sweepMesh.position.set(wx, wallHeight / 2, wz);
   sweepAI.active = true;
   sweepAI.state = 'IDLE';
-  sweepAI.nextSweepTime = clock.getElapsedTime() + 120; // 2 minutes from now
+  sweepAI.nextSweepTime = clock.getElapsed() + 120; // 2 minutes from now
   console.log("Sweep spawned. Next sweep at:", sweepAI.nextSweepTime);
 }
 
@@ -1416,7 +1427,7 @@ function startSweepRun() {
   sweepAI.state = 'ROAMING';
   sweepAI.sweepDuration = 0;
   sweepAI.cooldownTimer = 0;
-  sweepAI.lastCheck = clock.getElapsedTime();
+  sweepAI.lastCheck = clock.getElapsed();
 
   // Pick initial target (far away to ensure roaming)
   const t = pickRoamingTarget(sweepMesh ? sweepMesh.position : null, 30);
@@ -2260,44 +2271,46 @@ document.addEventListener('pointerlockchange', () => {
   }
 });
 
+const LOCK_COOLDOWN_MS = 1300; // Chrome blocks re-lock ~1s after Esc
+let lastUnlockTime = 0;
+let lockTimer = null;
+
+controls.addEventListener('unlock', () => {
+  lastUnlockTime = performance.now();
+});
+
 /**
- * Attempt to acquire pointer lock safely. If a recent unlock/error happened,
- * wait a bit before retrying to avoid "cannot be acquired immediately after the user has exited" errors.
+ * Request pointer lock, waiting out the browser's post-exit cooldown.
+ * Call from a click/keydown handler so the request has user activation.
  */
-function safeLock(retries = 6, delayMs = 180) {
-  // If we are in a cooldown window, schedule a retry instead of calling lock immediately.
-  if (pointerLockCooldown) {
-    if (retries > 0) {
-      setTimeout(() => safeLock(retries - 1, delayMs), delayMs);
-    }
+function safeLock(retries = 3) {
+  clearTimeout(lockTimer);
+  if (controls.isLocked || document.hidden) return;
+
+  const wait = LOCK_COOLDOWN_MS - (performance.now() - lastUnlockTime);
+  if (wait > 0) {
+    lockTimer = setTimeout(() => safeLock(retries), wait);
     return;
   }
 
+  let settled = false;
+  const cleanup = () => {
+    settled = true;
+    document.removeEventListener('pointerlockerror', onError);
+    document.removeEventListener('pointerlockchange', cleanup);
+  };
+  const onError = () => {
+    if (settled) return;
+    cleanup();
+    if (retries > 0) lockTimer = setTimeout(() => safeLock(retries - 1), 250);
+  };
+
+  document.addEventListener('pointerlockerror', onError);
+  document.addEventListener('pointerlockchange', cleanup);
+
   try {
-    // Some browsers may produce an asynchronous rejection internally when lock()
-    // is requested immediately after an exit; wrap call so any returned promise
-    // has a catch to avoid unhandledRejection.
-    try {
-      const p = Promise.resolve().then(() => controls.lock());
-      if (p && typeof p.catch === 'function') p.catch(() => { });
-    } catch (syncErr) {
-      // controls.lock() threw synchronously; handle like before by scheduling retry.
-      if (retries > 0) {
-        setTimeout(() => safeLock(retries - 1, delayMs), delayMs);
-      } else {
-        pointerLockCooldown = true;
-        setTimeout(() => { pointerLockCooldown = false; }, delayMs);
-      }
-    }
-  } catch (err) {
-    // Fallback safety: schedule retry rather than letting an unhandled rejection bubble.
-    if (retries > 0) {
-      setTimeout(() => safeLock(retries - 1, delayMs), delayMs);
-    } else {
-      pointerLockCooldown = true;
-      setTimeout(() => { pointerLockCooldown = false; }, delayMs);
-    }
-  }
+    controls.lock();
+  } catch { onError(); }
 }
 
 canvas.addEventListener('click', () => {
@@ -2391,31 +2404,6 @@ sweepSound.volume = 1.0;
 
 // colors / materials
 const textureLoader = new THREE.TextureLoader();
-const wallTex = textureLoader.load('./2025_12_09_0ys_Kleki.png');
-wallTex.magFilter = THREE.NearestFilter;
-wallTex.minFilter = THREE.NearestFilter;
-wallTex.wrapS = THREE.RepeatWrapping;
-wallTex.wrapT = THREE.RepeatWrapping;
-wallTex.generateMipmaps = false;
-
-const floorTex = textureLoader.load('./2025_12_09_0yv_Kleki.png');
-floorTex.magFilter = THREE.NearestFilter;
-floorTex.minFilter = THREE.NearestFilter;
-floorTex.wrapS = THREE.RepeatWrapping;
-floorTex.wrapT = THREE.RepeatWrapping;
-floorTex.generateMipmaps = false;
-
-const roofTex = textureLoader.load('./roofff.png');
-roofTex.magFilter = THREE.NearestFilter;
-roofTex.minFilter = THREE.NearestFilter;
-roofTex.wrapS = THREE.RepeatWrapping;
-roofTex.wrapT = THREE.RepeatWrapping;
-roofTex.generateMipmaps = false;
-
-const notebookTex = textureLoader.load('./2025_12_09_0z4_Kleki (6).png');
-notebookTex.magFilter = THREE.NearestFilter;
-notebookTex.minFilter = THREE.NearestFilter;
-notebookTex.generateMipmaps = false;
 
 // enemy billboard texture
 const enemyTex = textureLoader.load('./itgetsbalder.png');
@@ -2424,65 +2412,8 @@ enemyTex.minFilter = THREE.NearestFilter;
 enemyTex.generateMipmaps = false;
 
 // door textures
-const doorTex = textureLoader.load('./door.png');
-doorTex.magFilter = THREE.NearestFilter;
-doorTex.minFilter = THREE.NearestFilter;
-doorTex.generateMipmaps = false;
-
-const doorOpenedTex = textureLoader.load('./door_opened.png');
-doorOpenedTex.magFilter = THREE.NearestFilter;
-doorOpenedTex.minFilter = THREE.NearestFilter;
-doorOpenedTex.generateMipmaps = false;
-
-// NEW: poster textures for hallway walls
-const posterTex1 = textureLoader.load('./poster1.png');
-posterTex1.magFilter = THREE.NearestFilter;
-posterTex1.minFilter = THREE.NearestFilter;
-posterTex1.generateMipmaps = false;
-
-const posterTex2 = textureLoader.load('./poster2.png');
-posterTex2.magFilter = THREE.NearestFilter;
-posterTex2.minFilter = THREE.NearestFilter;
-posterTex2.generateMipmaps = false;
-
-const posterTex3 = textureLoader.load('./poster3.png');
-posterTex3.magFilter = THREE.NearestFilter;
-posterTex3.minFilter = THREE.NearestFilter;
-posterTex3.generateMipmaps = false;
-
-const posterTex4 = textureLoader.load('./poster4.png');
-posterTex4.magFilter = THREE.NearestFilter;
-posterTex4.minFilter = THREE.NearestFilter;
-posterTex4.generateMipmaps = false;
-
-const posterTex5 = textureLoader.load('./poster5.png');
-posterTex5.magFilter = THREE.NearestFilter;
-posterTex5.minFilter = THREE.NearestFilter;
-posterTex5.generateMipmaps = false;
-
-// NEW: poster 6 texture
-const posterTex6 = textureLoader.load('./poster6.png');
-posterTex6.magFilter = THREE.NearestFilter;
-posterTex6.minFilter = THREE.NearestFilter;
-posterTex6.generateMipmaps = false;
-
-// NEW: poster 7 texture
-const posterTex7 = textureLoader.load('./poster7.png');
-posterTex7.magFilter = THREE.NearestFilter;
-posterTex7.minFilter = THREE.NearestFilter;
-posterTex7.generateMipmaps = false;
-
-// NEW: poster 8 texture
-const posterTex8 = textureLoader.load('./poster8.png');
-posterTex8.magFilter = THREE.NearestFilter;
-posterTex8.minFilter = THREE.NearestFilter;
-posterTex8.generateMipmaps = false;
-
-// NEW: poster 9 texture
-const posterTex9 = textureLoader.load('./poster9.png');
-posterTex9.magFilter = THREE.NearestFilter;
-posterTex9.minFilter = THREE.NearestFilter;
-posterTex9.generateMipmaps = false;
+const doorTex = CACHED_IMG.textures.door;
+const doorOpenedTex = CACHED_IMG.textures.door_open;
 
 const oldBootsTex = textureLoader.load('./boots.png');
 oldBootsTex.magFilter = THREE.NearestFilter;
@@ -2490,63 +2421,16 @@ oldBootsTex.minFilter = THREE.NearestFilter;
 oldBootsTex.generateMipmaps = false;
 
 // NEW: Sweep texture
-const sweepTex = textureLoader.load('./2025_12_14_0sd_Kleki (1).png');
-sweepTex.magFilter = THREE.NearestFilter;
-sweepTex.minFilter = THREE.NearestFilter;
-sweepTex.generateMipmaps = false;
+const sweepTex = CACHED_IMG.characters.broom;
 
 // NEW: array of poster materials used for random hallway wall posters
-const posterMats = [
+const posterMats = [...Array.from({length: 8}, (_, i) => (
   new THREE.MeshStandardMaterial({
-    map: posterTex1,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  new THREE.MeshStandardMaterial({
-    map: posterTex2,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  new THREE.MeshStandardMaterial({
-    map: posterTex3,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  new THREE.MeshStandardMaterial({
-    map: posterTex4,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  new THREE.MeshStandardMaterial({
-    map: posterTex5,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  // NEW: material for poster 6
-  new THREE.MeshStandardMaterial({
-    map: posterTex6,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  // NEW: material for poster 7
-  new THREE.MeshStandardMaterial({
-    map: posterTex7,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  // NEW: material for poster 8
-  new THREE.MeshStandardMaterial({
-    map: posterTex8,
-    transparent: true,
-    side: THREE.DoubleSide
-  }),
-  // NEW: material for poster 9
-  new THREE.MeshStandardMaterial({
-    map: posterTex9,
+    map: CACHED_IMG.posters["poster" + (i + 1)],
     transparent: true,
     side: THREE.DoubleSide
   })
-];
+))];
 
 // NEW: item and splash textures
 const blueSodaTex = textureLoader.load('./dither_it_2025_12_10_0is_Kleki.png');
@@ -2554,18 +2438,19 @@ blueSodaTex.magFilter = THREE.NearestFilter;
 blueSodaTex.minFilter = THREE.NearestFilter;
 blueSodaTex.generateMipmaps = false;
 
-const purpleChocolateTex = textureLoader.load('./2025_12_10_0kd_Kleki.png');
-purpleChocolateTex.magFilter = THREE.NearestFilter;
-purpleChocolateTex.minFilter = THREE.NearestFilter;
-purpleChocolateTex.generateMipmaps = false;
+const chocoTex = CACHED_IMG.items.chocolate;
+const purpleChocolateTex = pointTex(textureLoader.load(chocoTex), false);
 
 // Preload DOM icon for purple chocolate
-const purpleChocolateIconSrc = './2025_12_10_0kd_Kleki.png';
+const purpleChocolateIconSrc = chocoTex.src;
 const purpleChocolateIcon = new Image();
 purpleChocolateIcon.src = purpleChocolateIconSrc;
 
 // NEW: minimap icon images for notebooks, player, and balder
-const notebookIconSrc = './2025_12_09_0z4_Kleki (6).png';
+const nbTex = CACHED_IMG.items.notebook;
+const noteBookTex = pointTex(textureLoader.load(nbTex), false);
+
+const notebookIconSrc = nbTex.src;
 const notebookIcon = new Image();
 notebookIcon.src = notebookIconSrc;
 
@@ -2610,13 +2495,8 @@ splashTex.minFilter = THREE.NearestFilter;
 splashTex.generateMipmaps = false;
 
 // NEW: exit textures
-const exitTex = textureLoader.load('./exitt.png');           // open/default EXIT sign
-exitTex.magFilter = THREE.NearestFilter;
-exitTex.minFilter = THREE.NearestFilter;
-
-const exitUsedTex = textureLoader.load('./wuhohhh (1).png'); // closed/used: smiley card
-exitUsedTex.magFilter = THREE.NearestFilter;
-exitUsedTex.minFilter = THREE.NearestFilter;
+const exitTex = CACHED_IMG.textures.exit;
+const exitUsedTex = CACHED_IMG.textures.exit2;
 
 // Preload DOM icon images for items so inventory icons appear instantly
 const blueSodaIconSrc = './dither_it_2025_12_10_0is_Kleki.png';
@@ -2624,15 +2504,15 @@ const blueSodaIcon = new Image();
 blueSodaIcon.src = blueSodaIconSrc;
 
 const floorMat = new THREE.MeshStandardMaterial({
-  map: floorTex,
+  map: CACHED_IMG.textures.carpet,
   color: 0xffffff
 }); // textured floor
 const roofMat = new THREE.MeshStandardMaterial({
-  map: roofTex,
+  map: CACHED_IMG.textures.roof,
   side: THREE.DoubleSide
 });
 const wallMat = new THREE.MeshStandardMaterial({
-  map: wallTex,
+  map: CACHED_IMG.textures.wall,
   color: 0xffffff,
   side: THREE.DoubleSide
 }); // textured walls, double-sided
@@ -2681,7 +2561,7 @@ doorClosedBackMat.color.copy(wallMat.color);
 doorOpenedBackMat.color.copy(wallMat.color);
 
 const notebookMat = new THREE.MeshStandardMaterial({
-  map: notebookTex,
+  map: noteBookTex,
   transparent: true,
   side: THREE.DoubleSide
 });
@@ -2851,22 +2731,10 @@ function spawnExits() {
       if (roomAtGrid(x, y)) continue;
 
       // Check 4 neighbors for empty space (walls)
-      // North
-      if (y - 1 < 0 || !grid[y - 1][x]) {
-        candidates.push({ x, y, dir: 'N' });
-      }
-      // South
-      if (y + 1 >= GH || !grid[y + 1][x]) {
-        candidates.push({ x, y, dir: 'S' });
-      }
-      // West
-      if (x - 1 < 0 || !grid[y][x - 1]) {
-        candidates.push({ x, y, dir: 'W' });
-      }
-      // East
-      if (x + 1 >= GW || !grid[y][x + 1]) {
-        candidates.push({ x, y, dir: 'E' });
-      }
+      if (y - 1 < 0 || !grid[y - 1][x]) candidates.push({ x, y, dir: 'N' }); // North
+      if (y + 1 >= GH || !grid[y + 1][x]) candidates.push({ x, y, dir: 'S' }); // South
+      if (x - 1 < 0 || !grid[y][x - 1]) candidates.push({ x, y, dir: 'W' }); // West
+      if (x + 1 >= GW || !grid[y][x + 1]) candidates.push({ x, y, dir: 'E' }); // East
     }
   }
 
@@ -2974,12 +2842,12 @@ function sendPlayerToDetention(durationSec = 15) {
   detentionActive = true;
 
   // Save current position to restore after detention
-  const savedPos = controls.getObject().position.clone();
+  const savedPos = controls.object.position.clone();
 
   // Teleport player to detention center (a little inside the room)
   const tx = (pr.x + pr.w / 2 - GW / 2) * TILE;
   const tz = (pr.y + pr.h / 2 - GH / 2) * TILE;
-  controls.getObject().position.set(tx, savedPos.y, tz);
+  controls.object.position.set(tx, savedPos.y, tz);
 
   // disable input and lock camera
   inputReady = false;
@@ -2992,7 +2860,7 @@ function sendPlayerToDetention(durationSec = 15) {
 
   detentionTimeout = setTimeout(() => {
     // restore position (try to put back where player was)
-    controls.getObject().position.copy(savedPos);
+    controls.object.position.copy(savedPos);
     controls.enabled = true;
     inputReady = true;
     detentionActive = false;
@@ -3007,7 +2875,7 @@ function bobAttemptSteal(state) {
   if (modBullyNoSteal) return;
 
   // only attempt if cooldown elapsed
-  if (state.cooldown > clock.getElapsedTime()) return;
+  if (state.cooldown > clock.getElapsed()) return;
   // pick a non-empty slot
   const occupied = inventory.map((it, i) => it ? i : -1).filter(i => i !== -1);
   if (!occupied.length) return;
@@ -3016,18 +2884,18 @@ function bobAttemptSteal(state) {
   inventory[idx] = null;
   refreshInventoryHUD();
   // small cooldown before next steal
-  state.cooldown = clock.getElapsedTime() + 8.0;
+  state.cooldown = clock.getElapsed() + 8.0;
   // play a light sound (reusing pickup) as feedback
   try { notebookPickupSound.currentTime = 0; notebookPickupSound.play(); } catch (e) { }
 }
 
 // helper: playgirl forces a brief interaction like Playtime
 function playgirlForcePlay(state) {
-  if (state.cooldown > clock.getElapsedTime()) return;
+  if (state.cooldown > clock.getElapsed()) return;
   // Freeze player briefly and nudge them to hop in place (we'll just disable movement for 3s)
   inputReady = false;
   controls.enabled = false;
-  state.cooldown = clock.getElapsedTime() + 12.0; // cooldown before re-trigger
+  state.cooldown = clock.getElapsed() + 12.0; // cooldown before re-trigger
   setTimeout(() => {
     controls.enabled = true;
     inputReady = true;
@@ -3036,8 +2904,8 @@ function playgirlForcePlay(state) {
 
 // helper: second prize nudges player forward like 1st prize
 function secondPrizeNudge(state) {
-  if (state.cooldown > clock.getElapsedTime()) return;
-  const playerPos = controls.getObject().position;
+  if (state.cooldown > clock.getElapsed()) return;
+  const playerPos = controls.object.position;
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
   dir.y = 0;
@@ -3045,24 +2913,24 @@ function secondPrizeNudge(state) {
   const push = dir.multiplyScalar(1.2);
   const proposed = playerPos.clone().add(push);
   if (!collides(proposed)) {
-    controls.getObject().position.copy(proposed);
+    controls.object.position.copy(proposed);
   }
-  state.cooldown = clock.getElapsedTime() + 4.0;
+  state.cooldown = clock.getElapsed() + 4.0;
 }
 
 // Principal reacts when player sprints nearby or uses soda/purple next to him
 function principalReact(state) {
   // respect mod: principal can be set to ignore player reactions
   if (modPrincipalIgnore) return;
-  if (state.cooldown > clock.getElapsedTime()) return;
-  const playerPos = controls.getObject().position;
+  if (state.cooldown > clock.getElapsed()) return;
+  const playerPos = controls.object.position;
   const d = state.mesh.position.distanceTo(playerPos);
   const sprinting = move.sprint;
   // If player sprints within 6 units or uses certain items near (we will detect usage in useHeldItem),
   // send to detention
   if (sprinting && d < TILE * 2) {
     sendPlayerToDetention(15);
-    state.cooldown = clock.getElapsedTime() + 20.0;
+    state.cooldown = clock.getElapsed() + 20.0;
   }
 }
 
@@ -3077,7 +2945,7 @@ useHeldItem = function () {
 
   // if used blue_soda or purple_chocolate, check nearby principals
   if (held === 'blue_soda' || held === 'purple_chocolate') {
-    const now = clock.getElapsedTime();
+    const now = clock.getElapsed();
     for (const st of npcStates) {
       if (st.type === 'principal') {
         // Respect mod: if Principal is set to ignore the player, skip reaction
@@ -3086,7 +2954,7 @@ useHeldItem = function () {
         // Respect per-principal cooldown to avoid repeated immediate detentions
         if (st.cooldown && st.cooldown > now) continue;
 
-        const d = st.mesh.position.distanceTo(controls.getObject().position);
+        const d = st.mesh.position.distanceTo(controls.object.position);
         if (d < TILE * 3) {
           sendPlayerToDetention(15);
           st.cooldown = now + 20.0;
@@ -3387,7 +3255,7 @@ function drawMinimap() {
   }
 
   // get player grid coordinates once
-  const p = controls && controls.getObject ? controls.getObject().position : { x: 0, z: 0 };
+  const p = controls && controls.getObject ? controls.object.position : { x: 0, z: 0 };
   const gx = Math.floor((p.x / TILE) + GW / 2);
   const gy = Math.floor((p.z / TILE) + GH / 2);
 
@@ -3435,7 +3303,7 @@ function drawMinimap() {
   }
 
   // show enemy (Balder) if walkie talkie active OR if modBaldiIcon toggled: draw Balder icon blinking
-  const now = clock.getElapsedTime();
+  const now = clock.getElapsed();
   const shouldShowBalder = (typeof enemyMesh !== 'undefined' && enemyMesh && (now < showEnemyOnMinimapUntil)) || (typeof enemyMesh !== 'undefined' && enemyMesh && modBaldiIcon);
   if (enemyMesh && shouldShowBalder) {
     if (Math.floor(now * 10) % 2 === 0) {
@@ -3614,7 +3482,7 @@ function tryInteractExit() {
 // shared helper to open a door state (used by player and enemy)
 function openDoorState(door, openedByEnemy = false) {
   if (!door) return;
-  const now = clock.getElapsedTime();
+  const now = clock.getElapsed();
   if (door.isOpen && now < door.openUntil) return;
 
   // open door: switch both sides to opened sprite and disable collision for 3 seconds
@@ -3757,7 +3625,7 @@ function tryCollectNotebook() {
   if (totalRooms > 0 && notebooksCollected >= totalRooms) {
     // mark moment when all collected (if not already marked)
     if (!allNotebooksCollectedAt) {
-      allNotebooksCollectedAt = clock.getElapsedTime();
+      allNotebooksCollectedAt = clock.getElapsed();
       // reset any previous speed bonus
       enemySpeedBonus = 0.0;
       try {
@@ -4182,7 +4050,7 @@ function useHeldItem() {
     const geom = new THREE.PlaneGeometry(splashSize, splashSize);
     const mesh = new THREE.Mesh(geom, splashMat);
 
-    const origin = controls.getObject().position.clone();
+    const origin = controls.object.position.clone();
     const startOffset = 0.6;
     mesh.position.set(
       origin.x + dirVec.x * startOffset,
@@ -4214,7 +4082,7 @@ function useHeldItem() {
     }
 
     // apply speed boost for 12 seconds (no dark mode / lighting changes)
-    const now = clock.getElapsedTime();
+    const now = clock.getElapsed();
     speedBoostUntil = now + 12.0;
 
     // immediately top off stamina
@@ -4224,12 +4092,12 @@ function useHeldItem() {
     // consume item unless inf items
     maybeConsume();
 
-    const now = clock.getElapsedTime();
+    const now = clock.getElapsed();
     if (isPeaceful()) {
       // reveal nearest uncollected notebook on the minimap for a short time
       let nearestIdx = -1;
       let bestDist = Infinity;
-      const playerPos = controls.getObject().position;
+      const playerPos = controls.object.position;
       for (let i = 0; i < notebookStates.length; i++) {
         const nb = notebookStates[i];
         if (!nb || nb.collected) continue;
@@ -4261,10 +4129,10 @@ function useHeldItem() {
     maybeConsume();
 
     // Create silent area (5 tiles radius)
-    const pos = controls.getObject().position.clone();
+    const pos = controls.object.position.clone();
     const radius = TILE * 5;
     const duration = 180.0; // 3 minutes
-    const now = clock.getElapsedTime();
+    const now = clock.getElapsed();
 
     // Create visual effect group
     const group = new THREE.Group();
@@ -4312,7 +4180,7 @@ function useHeldItem() {
     maybeConsume();
 
     // Immune to sweep push for 4 minutes
-    const now = clock.getElapsedTime();
+    const now = clock.getElapsed();
     sweepImmunityUntil = now + 240.0;
 
     // play rustle sound
@@ -4402,7 +4270,7 @@ function pickRoamingTarget(origin = null, minDistance = 0) {
 // NEW: raycast to check if chaser can see player (360 degree vision)
 function chaserCanSeePlayer() {
   if (!enemyMesh) return false;
-  const playerPos = controls.getObject().position;
+  const playerPos = controls.object.position;
   const enemyPos = enemyMesh.position;
 
   // Check distance first
@@ -4582,7 +4450,7 @@ function animate(time) {
   // the enemy "ignores door tiles" in the sense that it paths from room tile
   // center to corridor tile center and just walks through the door plane in between.
   if (enemyMesh) {
-    const playerPos = controls.getObject().position;
+    const playerPos = controls.object.position;
     const playerGridX = Math.floor(playerPos.x / TILE + GW / 2);
     const playerGridY = Math.floor(playerPos.z / TILE + GH / 2);
 
@@ -4834,7 +4702,7 @@ function animate(time) {
 
           // If player collected all notebooks, progressively increase enemy speed every 5s
           if (allNotebooksCollectedAt) {
-            const secondsSince = Math.max(0, clock.getElapsedTime() - allNotebooksCollectedAt);
+            const secondsSince = Math.max(0, clock.getElapsed() - allNotebooksCollectedAt);
             const increments = Math.floor(secondsSince / 5);
             // Each increment gives a small bonus; clamp to reasonable cap
             enemySpeedBonus = Math.min(6.0, increments * 0.35); // ~+0.35 units every 5s, max +6
@@ -4872,7 +4740,7 @@ function animate(time) {
     enemyMesh.lookAt(new THREE.Vector3(camera.position.x, enemyMesh.position.y, camera.position.z));
 
     // update chase music volume based on proximity
-    updateChaseMusic(controls.getObject().position, enemyMesh.position);
+    updateChaseMusic(controls.object.position, enemyMesh.position);
 
     // detect when enemy actually touches the player (no message or alert now)
     const toPlayer = new THREE.Vector3().subVectors(playerPos, enemyMesh.position);
@@ -4923,7 +4791,7 @@ function animate(time) {
           enemyMesh.position.y + ENEMY_HEIGHT * 0.2, // look slightly above center
           enemyMesh.position.z
         );
-        const backDir = new THREE.Vector3().subVectors(controls.getObject().position, enemyMesh.position);
+        const backDir = new THREE.Vector3().subVectors(controls.object.position, enemyMesh.position);
         backDir.y = 0;
         if (backDir.lengthSq() === 0) {
           backDir.set(0, 0, 1);
@@ -4932,11 +4800,11 @@ function animate(time) {
         backDir.normalize().multiplyScalar(0.4);
         const newPos = new THREE.Vector3().addVectors(enemyMesh.position, backDir);
         // raise camera relative to the enemy's billboard, but not too high
-        controls.getObject().position.set(newPos.x, enemyMesh.position.y + ENEMY_HEIGHT * 0.5, newPos.z);
+        controls.object.position.set(newPos.x, enemyMesh.position.y + ENEMY_HEIGHT * 0.5, newPos.z);
         camera.lookAt(faceTarget);
 
         // start ramped shake timing
-        jumpShakeStartTime = clock.getElapsedTime();
+        jumpShakeStartTime = clock.getElapsed();
 
         // play jumpscare scream
         try {
@@ -4960,7 +4828,7 @@ function animate(time) {
     }
   } else {
     // if no enemy, ensure chase music is stopped
-    updateChaseMusic(controls.getObject().position, controls.getObject().position);
+    updateChaseMusic(controls.object.position, controls.object.position);
   }
 
   // SWEEP AI LOGIC
@@ -4971,7 +4839,7 @@ function animate(time) {
     // Manage Audio
     if (sweepAI.state !== 'IDLE') {
       if (sweepSound.paused) { try { sweepSound.play(); } catch (e) { } }
-      const d = sweepMesh.position.distanceTo(controls.getObject().position);
+      const d = sweepMesh.position.distanceTo(controls.object.position);
       const vol = Math.max(0, 1 - d / 30);
       sweepSound.volume = vol;
     } else {
@@ -5050,27 +4918,27 @@ function animate(time) {
           sweepMesh.position.add(move);
 
           // Push Player
-          if (sweepMesh.position.distanceTo(controls.getObject().position) < 1.5) {
+          if (sweepMesh.position.distanceTo(controls.object.position) < 1.5) {
             // Check immunity (Old Boots)
             const immune = (now < sweepImmunityUntil);
 
             if (!immune) {
               const pushVec = move.clone().multiplyScalar(1.2);
-              const curPos = controls.getObject().position;
+              const curPos = controls.object.position;
               const nextPos = curPos.clone().add(pushVec);
 
               // Check collisions to prevent being pushed into walls or out of map
               if (!collides(nextPos)) {
-                controls.getObject().position.copy(nextPos);
+                controls.object.position.copy(nextPos);
               } else {
                 // Try sliding along X
                 const slideX = curPos.clone(); slideX.x += pushVec.x;
                 if (!collides(slideX)) {
-                  controls.getObject().position.copy(slideX);
+                  controls.object.position.copy(slideX);
                 } else {
                   // Try sliding along Z
                   const slideZ = curPos.clone(); slideZ.z += pushVec.z;
-                  if (!collides(slideZ)) controls.getObject().position.copy(slideZ);
+                  if (!collides(slideZ)) controls.object.position.copy(slideZ);
                 }
               }
             }
@@ -5192,7 +5060,7 @@ function animate(time) {
       }
 
       // PER-TYPE: interactions when the player 'touches' (close proximity)
-      const playerPos = controls.getObject().position;
+      const playerPos = controls.object.position;
       const dToPlayer = st.mesh.position.distanceTo(playerPos);
 
       // small cooldown per-NPC to avoid repeated triggers
@@ -5222,7 +5090,7 @@ function animate(time) {
               }
               state.mesh.visible = true;
               // remove blindness only if no other black-mode is active (simple approach)
-              if (!darkModeApplied && (!allNotebooksCollectedAt || clock.getElapsedTime() > state.specialState.testBlindUntil)) {
+              if (!darkModeApplied && (!allNotebooksCollectedAt || clock.getElapsed() > state.specialState.testBlindUntil)) {
                 scene.background = new THREE.Color(0xffffff);
                 if (scene.fog) {
                   scene.fog.color.setHex(diffSettings[currentDifficulty].fog || 0xffffff);
@@ -5369,15 +5237,15 @@ function animate(time) {
             controls.enabled = false;
             isGameOver = false; // keep game running visually
             // drag duration approximation based on distance
-            const from = controls.getObject().position.clone();
+            const from = controls.object.position.clone();
             const to = new THREE.Vector3(classPos.x, from.y, classPos.z);
             const dragTime = Math.max(1.2, from.distanceTo(to) / 1.2);
-            const startT = clock.getElapsedTime();
+            const startT = clock.getElapsed();
             const interval = setInterval(() => {
-              const elapsed = clock.getElapsedTime() - startT;
+              const elapsed = clock.getElapsed() - startT;
               const alpha = Math.min(1, elapsed / dragTime);
               const interp = new THREE.Vector3().lerpVectors(from, to, alpha);
-              controls.getObject().position.copy(interp);
+              controls.object.position.copy(interp);
               if (alpha >= 1) {
                 clearInterval(interval);
                 // lock classroom for 10s and set pomp into chaotic roaming inside classrooms
@@ -5386,9 +5254,9 @@ function animate(time) {
                 st.specialState.dragging = false;
                 controls.enabled = true;
                 // Lock classroom by blocking exits nearby: simplest approach, we'll set a local flag and schedule unlock
-                st.specialState.classroomLockedUntil = clock.getElapsedTime() + 10.0;
+                st.specialState.classroomLockedUntil = clock.getElapsed() + 10.0;
                 // Make pomp go chaotic: random teleports between classroom centers for 20s
-                st.specialState.chaoticUntil = clock.getElapsedTime() + 20.0;
+                st.specialState.chaoticUntil = clock.getElapsed() + 20.0;
               }
             }, 50);
           }
@@ -5454,7 +5322,7 @@ function animate(time) {
           st.specialState.activeWind = null;
         } else {
           // apply gentle push to player if within a long narrow cone along the wind dir
-          const playerVec = controls.getObject().position.clone();
+          const playerVec = controls.object.position.clone();
           const dx = playerVec.x - wind.x;
           const dz = playerVec.z - wind.z;
           const forwardDist = dx * wind.dir.x + dz * wind.dir.z;
@@ -5462,8 +5330,8 @@ function animate(time) {
           if (forwardDist > 0.5 && forwardDist < 12 && lateral < 3.0) {
             // push player slowly backwards along -wind.dir
             const push = wind.dir.clone().multiplyScalar(-wind.strength * dt * 0.45);
-            const nextPos = controls.getObject().position.clone().add(push);
-            if (!collides(nextPos)) controls.getObject().position.copy(nextPos);
+            const nextPos = controls.object.position.clone().add(push);
+            if (!collides(nextPos)) controls.object.position.copy(nextPos);
           }
 
           // push enemy if present
@@ -5608,7 +5476,7 @@ function animate(time) {
     for (let i = 0; i < notebookStates.length; i++) {
       const nb = notebookStates[i];
       if (!nb || nb.collected) continue;
-      const d = controls.getObject().position.distanceTo(nb.mesh.position);
+      const d = controls.object.position.distanceTo(nb.mesh.position);
       if (d < bestDist) {
         bestDist = d;
         targetPos = nb.mesh.position.clone();
@@ -5618,7 +5486,7 @@ function animate(time) {
     if (!targetPos) {
       for (const es of exitStates) {
         if (!es || es.collected) continue;
-        const d = controls.getObject().position.distanceTo(es.mesh.position);
+        const d = controls.object.position.distanceTo(es.mesh.position);
         if (d < bestDist) {
           bestDist = d;
           targetPos = es.mesh.position.clone();
@@ -5628,7 +5496,7 @@ function animate(time) {
 
     // If Balder is near (within 6 tiles), attempt to use blue soda if available
     if (enemyMesh) {
-      const dBalder = controls.getObject().position.distanceTo(enemyMesh.position);
+      const dBalder = controls.object.position.distanceTo(enemyMesh.position);
       if (dBalder < TILE * 6) {
         // find blue_soda index in inventory
         const sodaIdx = inventory.findIndex(it => it && it.type === 'blue_soda');
@@ -5644,7 +5512,7 @@ function animate(time) {
       // disable manual move flags while autoplay is active
       move.fwd = move.back = move.left = move.right = move.sprint = false;
 
-      const playerPos = controls.getObject().position;
+      const playerPos = controls.object.position;
       const dirTo = new THREE.Vector3().subVectors(targetPos, playerPos);
       dirTo.y = 0;
       if (dirTo.lengthSq() > 0.0001) {
@@ -5654,19 +5522,19 @@ function animate(time) {
         const step = dirTo.multiplyScalar(autoSpeed * dt);
         const next = playerPos.clone().add(step);
         if (!collides(next)) {
-          controls.getObject().position.copy(next);
+          controls.object.position.copy(next);
         } else {
           // attempt axis sliding
           const nextX = playerPos.clone().add(new THREE.Vector3(step.x, 0, 0));
-          if (!collides(nextX)) controls.getObject().position.copy(nextX);
+          if (!collides(nextX)) controls.object.position.copy(nextX);
           const nextZ = playerPos.clone().add(new THREE.Vector3(0, 0, step.z));
-          if (!collides(nextZ)) controls.getObject().position.copy(nextZ);
+          if (!collides(nextZ)) controls.object.position.copy(nextZ);
         }
       }
 
       // NEW: If the autoplay target is within interaction reach, perform interactions automatically
       try {
-        const distToTarget = controls.getObject().position.distanceTo(targetPos);
+        const distToTarget = controls.object.position.distanceTo(targetPos);
         if (distToTarget <= INTERACT_REACH) {
           // Attempt pickups/interactions in the same priority order as player clicks
           tryPickupItem();
@@ -5733,21 +5601,21 @@ function animate(time) {
   if (dirVec.lengthSq() > 0) {
     dirVec.normalize().applyQuaternion(camera.quaternion);
     dirVec.y = 0;
-    const next = controls.getObject().position.clone().addScaledVector(dirVec, speed * dt);
+    const next = controls.object.position.clone().addScaledVector(dirVec, speed * dt);
     if (!collides(next)) {
-      controls.getObject().position.copy(next);
+      controls.object.position.copy(next);
     } else {
       // try axis-separated sliding
-      const nextX = controls.getObject().position.clone().addScaledVector(new THREE.Vector3(dirVec.x, 0, 0), speed * dt);
-      if (!collides(nextX)) controls.getObject().position.copy(nextX);
-      const nextZ = controls.getObject().position.clone().addScaledVector(new THREE.Vector3(0, 0, dirVec.z), speed * dt);
-      if (!collides(nextZ)) controls.getObject().position.copy(nextZ);
+      const nextX = controls.object.position.clone().addScaledVector(new THREE.Vector3(dirVec.x, 0, 0), speed * dt);
+      if (!collides(nextX)) controls.object.position.copy(nextX);
+      const nextZ = controls.object.position.clone().addScaledVector(new THREE.Vector3(0, 0, dirVec.z), speed * dt);
+      if (!collides(nextZ)) controls.object.position.copy(nextZ);
     }
   }
 
   // NEW: Touch-based exit collection — if player is close enough to any active exit, collect it automatically.
   if (darkModeApplied && Array.isArray(exitStates) && exitStates.length) {
-    const playerPos = controls.getObject().position;
+    const playerPos = controls.object.position;
     for (const es of exitStates) {
       if (es.collected) continue;
       // distance check in world units; use INTERACT_REACH as defined for ray interactions
@@ -5872,7 +5740,7 @@ function startPostJumpscareSequence() {
 
 function applyEnvironmentShake() {
   // ramp intensity: every 250ms ms jumpscare, increase shake a bit
-  const now = clock.getElapsedTime();
+  const now = clock.getElapsed();
   const elapsed = Math.max(0, now - jumpShakeStartTime);
   const steps = Math.floor(elapsed / 0.25); // 0.25s per step
   const base = 0.15;

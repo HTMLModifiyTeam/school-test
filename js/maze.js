@@ -1,18 +1,121 @@
-import { rand, isPositionInRoom } from "./utils";
-
 /**
- * Maze generator that places rectangular rooms of allowed sizes on a grid.
- * @exports generateRooms(gridW,gridH,roomSizes,count)
- * @returns {{grid, rooms, doors}|null} - Rooms data or null
+ * Room-and-corridor maze generator.
+ *
+ * Places rectangular rooms on a grid, links them with routed corridors
+ * (spanning tree + a few loops), adds extra doors and one dead-end alcove.
+ *
+ * @param {number} gridW
+ * @param {number} gridH
+ * @param {number[][]} roomSizes  allowed [w, h] pairs
+ * @param {number} attempts       max placement tries per level
+ * @param {number} targetRooms    stop placing once this many rooms exist
+ * @param {object} [options]
+ * @param {number|null} [options.seed=null]      integer seed for reproducible levels
+ * @param {number} [options.wideChance=0.5]      chance a corridor is 2 tiles wide
+ * @param {number} [options.loopFactor=0.3]      extra loop corridors per room
+ * @param {number} [options.maxRetries=8]        regenerate if some room is unreachable
+ * @returns {{grid, rooms, doors, blockedDoorEdges, specialRoom}}
  */
-export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5], [3, 5]], attempts = 400, targetRooms = 20) {
+export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5], [3, 5]], attempts = 400, targetRooms = 20, options = {}) {
+  const { seed = null, wideChance = 0.5, loopFactor = 0.3, maxRetries = 8 } = options;
+  const rng = seed === null ? Math.random : mulberry32(seed);
+
+  // Regenerate until every room is reachable through its doors; keep the best try.
+  let best = null;
+  for (let i = 0; i < maxRetries; i++) {
+    const result = buildLevel(gridW, gridH, roomSizes, attempts, targetRooms, { rng, wideChance, loopFactor });
+    if (result.reached === result.total) return result.level;
+    if (!best || result.reached > best.reached) best = result;
+  }
+  return best.level;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const DIRS = [
+  { dx: 0, dy: -1, dir: 'N' },
+  { dx: 1, dy: 0, dir: 'E' },
+  { dx: 0, dy: 1, dir: 'S' },
+  { dx: -1, dy: 0, dir: 'W' },
+];
+
+const ROOM_PADDING = 2;   // empty tiles required around each room
+const TURN_COST = 2;      // discourages zig-zag corridors
+const RING_COST = 8;      // discourages hugging a room wall (except at the door)
+const PARALLEL_COST = 1;  // discourages new corridors running right beside old ones
+const NOISE = 0.5;        // random cost jitter so routes vary
+
+/** Small seedable PRNG (mulberry32). */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+class MinHeap {
+  constructor() { this.a = []; }
+  get size() { return this.a.length; }
+  push(p, v) {
+    const a = this.a;
+    a.push([p, v]);
+    let i = a.length - 1;
+    while (i > 0) {
+      const par = (i - 1) >> 1;
+      if (a[par][0] <= a[i][0]) break;
+      [a[par], a[i]] = [a[i], a[par]];
+      i = par;
+    }
+  }
+  pop() {
+    const a = this.a;
+    const top = a[0];
+    const last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < a.length && a[l][0] < a[m][0]) m = l;
+        if (r < a.length && a[r][0] < a[m][0]) m = r;
+        if (m === i) break;
+        [a[m], a[i]] = [a[i], a[m]];
+        i = m;
+      }
+    }
+    return top;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Level construction
+// ---------------------------------------------------------------------------
+
+function buildLevel(gridW, gridH, roomSizes, attempts, targetRooms, { rng, wideChance, loopFactor }) {
+  const W = gridW;
+  const randInt = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+  const shuffle = (arr) => {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  };
+
   const grid = Array.from({ length: gridH }, () => Array(gridW).fill(0));
+  const roomAt = new Int16Array(gridW * gridH).fill(-1);
+  const isRoom = (x, y) => x >= 0 && y >= 0 && x < gridW && y < gridH && roomAt[y * W + x] >= 0;
   const rooms = [];
 
-  // helper to test overlap with padding so rooms are not too close to each other
-  const ROOM_PADDING = 2; // tiles of empty space around each room
+  // ---- 1. Place rooms -----------------------------------------------------
   function canPlace(x, y, w, h) {
-    if (x < ROOM_PADDING || y < ROOM_PADDING || x + w + ROOM_PADDING > gridW || y + h + ROOM_PADDING > gridH) return false;
     for (let j = y - ROOM_PADDING; j < y + h + ROOM_PADDING; j++) {
       for (let i = x - ROOM_PADDING; i < x + w + ROOM_PADDING; i++) {
         if (grid[j][i]) return false;
@@ -21,511 +124,318 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
     return true;
   }
 
-  // place rooms randomly across the map (within padding) instead of biasing to edges
-  let placed = 0;
-  for (let t = 0; t < attempts && placed < targetRooms; t++) {
-    const [rw, rh] = roomSizes[Math.floor(Math.random() * roomSizes.length)];
-
-    const minX = ROOM_PADDING;
+  for (let t = 0; t < attempts && rooms.length < targetRooms; t++) {
+    const [rw, rh] = roomSizes[Math.floor(rng() * roomSizes.length)];
     const maxX = gridW - rw - ROOM_PADDING;
-    const minY = ROOM_PADDING;
     const maxY = gridH - rh - ROOM_PADDING;
-    if (minX > maxX || minY > maxY) continue;
+    if (ROOM_PADDING > maxX || ROOM_PADDING > maxY) continue;
 
-    const x = rand(minX, maxX);
-    const y = rand(minY, maxY);
-
+    const x = randInt(ROOM_PADDING, maxX);
+    const y = randInt(ROOM_PADDING, maxY);
     if (!canPlace(x, y, rw, rh)) continue;
-    // write room
-    for (let j = y; j < y + rh; j++) for (let i = x; i < x + rw; i++) grid[j][i] = 1;
-    rooms.push({ x, y, w: rw, h: rh, id: placed });
-    placed++;
+
+    const id = rooms.length;
+    for (let j = y; j < y + rh; j++) {
+      for (let i = x; i < x + rw; i++) {
+        grid[j][i] = 1;
+        roomAt[j * W + i] = id;
+      }
+    }
+    rooms.push({ x, y, w: rw, h: rh, id });
   }
 
-  // If no rooms, return early
-  if (rooms.length === 0) return { grid, rooms, doors: [] };
+  if (rooms.length === 0) {
+    return {
+      level: { grid, rooms, doors: [], blockedDoorEdges: [], specialRoom: null },
+      reached: 0,
+      total: 0,
+    };
+  }
 
-  // For each room, pick a single perimeter "anchor" tile just outside its wall,
-  // carve it into a corridor tile, and store it on the room.
-  const anchors = [];
+  // ---- 2. Routing data ----------------------------------------------------
+  // `blocked` = map border + every tile touching a room (room tiles + 1-tile ring).
+  // Corridors may only enter the ring at "ports" (the tile in front of a wall),
+  // so they run 2 tiles from walls and never cut through or hug other rooms.
+  const blocked = new Uint8Array(gridW * gridH);
+  for (let x = 0; x < gridW; x++) { blocked[x] = 1; blocked[(gridH - 1) * W + x] = 1; }
+  for (let y = 0; y < gridH; y++) { blocked[y * W] = 1; blocked[y * W + gridW - 1] = 1; }
   for (const r of rooms) {
-    const candidates = [];
-
-    // top edge neighbors
-    for (let dx = 0; dx < r.w; dx++) {
-      const rx = r.x + dx;
-      const ry = r.y - 1;
-      if (ry >= 0 && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
-    }
-    // bottom edge neighbors
-    for (let dx = 0; dx < r.w; dx++) {
-      const rx = r.x + dx;
-      const ry = r.y + r.h;
-      if (ry < gridH && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
-    }
-    // left edge neighbors
-    for (let dy = 0; dy < r.h; dy++) {
-      const ry = r.y + dy;
-      const rx = r.x - 1;
-      if (rx >= 0 && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
-    }
-    // right edge neighbors
-    for (let dy = 0; dy < r.h; dy++) {
-      const ry = r.y + dy;
-      const rx = r.x + r.w;
-      if (rx < gridW && grid[ry][rx] === 0) candidates.push({ x: rx, y: ry });
-    }
-
-    if (candidates.length) {
-      const chosen = candidates[rand(0, candidates.length - 1)];
-      grid[chosen.y][chosen.x] = 1; // carve corridor tile just outside the room
-      r.anchor = { x: chosen.x, y: chosen.y };
-      anchors.push(r.anchor);
-    } else {
-      // fallback: if somehow surrounded, just use room center as anchor
-      const cx = Math.floor(r.x + r.w / 2);
-      const cy = Math.floor(r.y + r.h / 2);
-      r.anchor = { x: cx, y: cy };
-      anchors.push(r.anchor);
+    for (let y = r.y - 1; y <= r.y + r.h; y++) {
+      for (let x = r.x - 1; x <= r.x + r.w; x++) {
+        if (x >= 0 && y >= 0 && x < gridW && y < gridH) blocked[y * W + x] = 1;
+      }
     }
   }
 
-  // Carve corridors between two points.
-  // Each corridor has a 1-in-5 chance to be 2 cells wide along its length.
-  // Corridors are clean L-shaped paths with only straight segments
-  // and single 90-degree turns (no jagged random walks).
-  function carveCorridor(x1, y1, x2, y2) {
-    let x = x1;
-    let y = y1;
-    if (x < 0 || x >= gridW || y < 0 || y >= gridH) return;
+  // Ports: tiles just outside each wall, tagged with the outward direction index.
+  const ports = rooms.map((r) => {
+    const p = [];
+    for (let x = r.x; x < r.x + r.w; x++) {
+      p.push({ x, y: r.y - 1, d: 0 });
+      p.push({ x, y: r.y + r.h, d: 2 });
+    }
+    for (let y = r.y; y < r.y + r.h; y++) {
+      p.push({ x: r.x - 1, y, d: 3 });
+      p.push({ x: r.x + r.w, y, d: 1 });
+    }
+    return p.filter((c) => c.x > 0 && c.y > 0 && c.x < gridW - 1 && c.y < gridH - 1);
+  });
 
-    // Decide once per corridor if it should be widened to 2 cells,
-    // and on which side to widen.
-    const widen = Math.random() < 0.5; // Increased chance for wide hallways
-    const side = Math.random() < 0.5 ? -1 : 1;
+  /** Cheapest corridor between two rooms (Dijkstra over cell+heading states). */
+  function findPath(ai, bi, reuseCost) {
+    const cells = gridW * gridH;
+    const open = new Uint8Array(cells);
+    const goal = new Uint8Array(cells);
+    for (const p of ports[ai]) open[p.y * W + p.x] = 1;
+    for (const p of ports[bi]) { open[p.y * W + p.x] = 1; goal[p.y * W + p.x] = 1; }
 
-    function carveCell(cx, cy, dir) {
-      if (cx < 0 || cx >= gridW || cy < 0 || cy >= gridH) return;
-      grid[cy][cx] = 1;
+    const dist = new Float64Array(cells * 4).fill(Infinity);
+    const prev = new Int32Array(cells * 4).fill(-1);
+    const heap = new MinHeap();
 
-      if (!widen || !dir) return;
+    for (const p of ports[ai]) {
+      const s = (p.y * W + p.x) * 4 + p.d;
+      const c = grid[p.y][p.x] ? reuseCost : 1;
+      if (c < dist[s]) { dist[s] = c; heap.push(c, s); }
+    }
 
-      if (dir === 'H') {
-        // widen horizontally carved segment vertically (above or below)
-        const wy = cy + side;
-        if (wy >= 0 && wy < gridH) {
-          grid[wy][cx] = 1;
+    let end = -1;
+    while (heap.size) {
+      const [d, s] = heap.pop();
+      if (d > dist[s]) continue;
+      const cell = s >> 2;
+      const dir = s & 3;
+      if (goal[cell]) { end = s; break; }
+      const cx = cell % W;
+      const cy = (cell / W) | 0;
+
+      for (let nd = 0; nd < 4; nd++) {
+        if (nd === ((dir + 2) & 3)) continue; // no U-turns
+        const nx = cx + DIRS[nd].dx;
+        const ny = cy + DIRS[nd].dy;
+        if (nx < 0 || ny < 0 || nx >= gridW || ny >= gridH) continue;
+        const ncell = ny * W + nx;
+        if (blocked[ncell] && !open[ncell]) continue;
+
+        let c = rng() * NOISE;
+        if (grid[ny][nx]) {
+          c += reuseCost;
+        } else {
+          c += 1;
+          // avoid running directly alongside an existing corridor
+          for (const q of DIRS) if (grid[ny + q.dy][nx + q.dx]) { c += PARALLEL_COST; break; }
         }
-      } else if (dir === 'V') {
-        // widen vertically carved segment horizontally (left or right)
-        const wx = cx + side;
-        if (wx >= 0 && wx < gridW) {
-          grid[cy][wx] = 1;
-        }
+        if (nd !== dir) c += TURN_COST;
+        if (open[ncell] && !goal[ncell]) c += RING_COST;
+
+        const ns = ncell * 4 + nd;
+        const total = d + c;
+        if (total < dist[ns]) { dist[ns] = total; prev[ns] = s; heap.push(total, ns); }
       }
     }
+    if (end === -1) return null;
 
-    // carve starting cell without a direction
-    carveCell(x, y, null);
+    const path = [];
+    for (let s = end; s !== -1; s = prev[s]) {
+      const cell = s >> 2;
+      path.push({ x: cell % W, y: (cell / W) | 0 });
+    }
+    return path.reverse();
+  }
 
-    if (Math.random() < 0.5) { // horizontalFirst
-      // move horizontally first, then vertically
-      const stepX = x2 > x ? 1 : -1;
-      while (x !== x2) {
-        x += stepX;
-        if (x < 0 || x >= gridW) break;
-        carveCell(x, y, 'H');
-      }
+  function carvePath(path, widen, side) {
+    for (let i = 0; i < path.length; i++) {
+      const { x, y } = path[i];
+      grid[y][x] = 1;
+      if (!widen || i === 0 || i === path.length - 1) continue;
 
-      const stepY = y2 > y ? 1 : -1;
-      while (y !== y2) {
-        y += stepY;
-        if (y < 0 || y >= gridH) break;
-        carveCell(x, y, 'V');
-      }
-    } else {
-      // move vertically first, then horizontally
-      const stepY = y2 > y ? 1 : -1;
-      while (y !== y2) {
-        y += stepY;
-        if (y < 0 || y >= gridH) break;
-        carveCell(x, y, 'V');
-      }
-
-      const stepX = x2 > x ? 1 : -1;
-      while (x !== x2) {
-        x += stepX;
-        if (x < 0 || x >= gridW) break;
-        carveCell(x, y, 'H');
-      }
+      // widen straight stretches only; never widen into rooms/rings/border
+      const p = path[i - 1], n = path[i + 1];
+      let wx = x, wy = y;
+      if (p.y === y && n.y === y) wy = y + side;
+      else if (p.x === x && n.x === x) wx = x + side;
+      else continue;
+      if (!blocked[wy * W + wx]) grid[wy][wx] = 1;
     }
   }
 
-  // Connect room anchors with a short-hallway network:
-  // build a minimum-spanning-tree over anchors using Manhattan distance,
-  // so each room has a single connection into the corridor network,
-  // and nearby rooms are preferred (keeping corridors shorter).
-  const roomAnchors = rooms.map(r => ({ room: r, x: r.anchor.x, y: r.anchor.y }));
-  if (roomAnchors.length > 1) {
-    const connected = new Set();
-    const remaining = new Set();
-
-    for (let i = 0; i < roomAnchors.length; i++) remaining.add(i);
-    connected.add(0);
-    remaining.delete(0);
-
-    while (remaining.size) {
-      let bestFrom = null;
-      let bestTo = null;
-      let bestDist = Infinity;
-
-      for (const i of connected) {
-        const a = roomAnchors[i];
-        for (const j of remaining) {
-          const b = roomAnchors[j];
-          const d = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-          if (d < bestDist) {
-            bestDist = d;
-            bestFrom = i;
-            bestTo = j;
-          }
-        }
-      }
-
-      if (bestTo === null) break;
-      connected.add(bestTo);
-      remaining.delete(bestTo);
-
-      const a = roomAnchors[bestFrom];
-      const b = roomAnchors[bestTo];
-      carveCorridor(a.x, a.y, b.x, b.y);
-    }
+  function connect(i, j, reuseCost, minNewTiles = 0, maxLen = Infinity) {
+    const path = findPath(i, j, reuseCost);
+    if (!path || path.length > maxLen) return false;
+    if (path.filter((c) => !grid[c.y][c.x]).length < minNewTiles) return false;
+    carvePath(path, rng() < wideChance, rng() < 0.5 ? -1 : 1);
+    if (!rooms[i].anchor) rooms[i].anchor = path[0];
+    if (!rooms[j].anchor) rooms[j].anchor = path[path.length - 1];
+    return true;
   }
 
-  // NEW: Add random shortcut hallways to connect midpoints of different long segments
-  const longSegments = [];
-  // Find horizontal segments > 6
-  for (let y = 0; y < gridH; y++) {
-    let start = -1;
-    for (let x = 0; x < gridW; x++) {
-      if (grid[y][x]) {
-        if (start === -1) start = x;
-      } else {
-        if (start !== -1) {
-          if (x - start > 6) longSegments.push({ x: start, y, len: x - start, dir: 'H' });
-          start = -1;
-        }
+  // ---- 3. Connect rooms ---------------------------------------------------
+  const center = rooms.map((r) => ({ x: r.x + (r.w - 1) / 2, y: r.y + (r.h - 1) / 2 }));
+  const dist = (i, j) => Math.abs(center[i].x - center[j].x) + Math.abs(center[i].y - center[j].y);
+  const pairKey = (i, j) => (i < j ? `${i}-${j}` : `${j}-${i}`);
+
+  // Spanning tree (Prim) guarantees every room is linked.
+  const inTree = new Set([0]);
+  const treePairs = new Set();
+  while (inTree.size < rooms.length) {
+    let bi = -1, bj = -1, bd = Infinity;
+    for (const i of inTree) {
+      for (let j = 0; j < rooms.length; j++) {
+        if (inTree.has(j)) continue;
+        const d = dist(i, j);
+        if (d < bd) { bd = d; bi = i; bj = j; }
       }
     }
-    if (start !== -1 && gridW - start > 6) longSegments.push({ x: start, y, len: gridW - start, dir: 'H' });
-  }
-  // Find vertical segments > 6
-  for (let x = 0; x < gridW; x++) {
-    let start = -1;
-    for (let y = 0; y < gridH; y++) {
-      if (grid[y][x]) {
-        if (start === -1) start = y;
-      } else {
-        if (start !== -1) {
-          if (y - start > 6) longSegments.push({ x, y: start, len: y - start, dir: 'V' });
-          start = -1;
-        }
-      }
-    }
-    if (start !== -1 && gridH - start > 6) longSegments.push({ x, y: start, len: gridH - start, dir: 'V' });
+    inTree.add(bj);
+    treePairs.add(pairKey(bi, bj));
+    connect(bi, bj, 0.35);
   }
 
-  // Shuffle segments and connect distant pairs (> 9 cells) to create shortcuts
-  const extraLinks = Math.floor(Math.random() * 4) + 4;
-  longSegments.sort(() => Math.random() - 0.5);
-
-  let linksAdded = 0;
-  for (let i = 0; i < longSegments.length; i++) {
-    if (linksAdded >= extraLinks) break;
-    const segA = longSegments[i];
-
-    // Search for a partner that is far enough away (> 8-9 cells)
-    for (let j = i + 1; j < longSegments.length; j++) {
-      const segB = longSegments[j];
-
-      // Get midpoint of each segment
-      const mxA = segA.dir === 'H' ? segA.x + Math.floor(segA.len / 2) : segA.x;
-      const myA = segA.dir === 'H' ? segA.y : segA.y + Math.floor(segA.len / 2);
-      const mxB = segB.dir === 'H' ? segB.x + Math.floor(segB.len / 2) : segB.x;
-      const myB = segB.dir === 'H' ? segB.y : segB.y + Math.floor(segB.len / 2);
-
-      const dx = mxA - mxB;
-      const dy = myA - myB;
-
-      // Check if hallways are more than 9 cells apart
-      if (dx * dx + dy * dy > 81) {
-        carveCorridor(mxA, myA, mxB, myB);
-        linksAdded++;
-        break; // Found a match for segA, move to next
-      }
+  // Loops: link a few nearby, not-yet-linked room pairs so the map isn't a pure tree.
+  const loopCandidates = new Map();
+  for (let i = 0; i < rooms.length; i++) {
+    const nearest = rooms.map((_, j) => j).filter((j) => j !== i).sort((a, b) => dist(i, a) - dist(i, b)).slice(0, 2);
+    for (const j of nearest) {
+      const k = pairKey(i, j);
+      if (!treePairs.has(k) && !loopCandidates.has(k)) loopCandidates.set(k, [Math.min(i, j), Math.max(i, j)]);
     }
   }
+  let loopsLeft = Math.round(rooms.length * loopFactor);
+  for (const [a, b] of shuffle([...loopCandidates.values()])) {
+    if (loopsLeft <= 0) break;
+    if (connect(a, b, 1, 3, 45)) loopsLeft--;
+  }
 
-  // NEW: Add 1-2 extra random connectors from hallways directly into rooms
-  // This creates occasional loops or second entrances to rooms.
-  const extraConnectionCandidates = [];
+  // Rooms with no corridor (single-room levels) fall back to their center.
+  for (const r of rooms) {
+    if (!r.anchor) r.anchor = { x: Math.floor(r.x + r.w / 2), y: Math.floor(r.y + r.h / 2) };
+  }
+
+  // ---- 4. Extra doors: punch through the 1-tile gap between a room and a passing hall
+  const extra = [];
   for (let y = 1; y < gridH - 1; y++) {
     for (let x = 1; x < gridW - 1; x++) {
-      if (grid[y][x] !== 0) continue; // must be a wall currently
-
-      const nRoom = isPositionInRoom(x, y - 1, rooms);
-      const sRoom = isPositionInRoom(x, y + 1, rooms);
-      const wRoom = isPositionInRoom(x - 1, y, rooms);
-      const eRoom = isPositionInRoom(x + 1, y, rooms);
-
-      const nHall = grid[y - 1][x] && !nRoom;
-      const sHall = grid[y + 1][x] && !sRoom;
-      const wHall = grid[y][x - 1] && !wRoom;
-      const eHall = grid[y][x + 1] && !eRoom;
-
-      // Check if this wall separates a room from a hall (cardinal directions)
-      let isCandidate = false;
-      // Horizontal separation (wall is vertical, rooms/halls are E/W)
-      if ((wRoom && eHall) || (eRoom && wHall)) isCandidate = true;
-      // Vertical separation (wall is horizontal, rooms/halls are N/S)
-      if ((nRoom && sHall) || (sRoom && nHall)) isCandidate = true;
-
-      if (isCandidate) extraConnectionCandidates.push({ x, y });
+      if (grid[y][x]) continue;
+      const nHall = grid[y - 1][x] && !isRoom(x, y - 1);
+      const sHall = grid[y + 1][x] && !isRoom(x, y + 1);
+      const wHall = grid[y][x - 1] && !isRoom(x - 1, y);
+      const eHall = grid[y][x + 1] && !isRoom(x + 1, y);
+      if (
+        (isRoom(x - 1, y) && eHall) || (isRoom(x + 1, y) && wHall) ||
+        (isRoom(x, y - 1) && sHall) || (isRoom(x, y + 1) && nHall)
+      ) extra.push({ x, y });
     }
   }
+  shuffle(extra);
+  for (let i = 0, n = randInt(1, 2); i < n && i < extra.length; i++) grid[extra[i].y][extra[i].x] = 1;
 
-  // Shuffle and pick 1-2 candidates to carve
-  if (extraConnectionCandidates.length) {
-    const numExtra = Math.floor(Math.random() * 2) + 1;
-    for (let i = 0; i < numExtra; i++) {
-      if (!extraConnectionCandidates.length) break;
-      const idx = Math.floor(Math.random() * extraConnectionCandidates.length);
-      const p = extraConnectionCandidates[idx];
-      grid[p.y][p.x] = 1; // carve path
-      extraConnectionCandidates.splice(idx, 1);
-    }
-  }
-
-  // Cleanup: remove isolated 1x1 corridor tiles (not in rooms) that only touch <=1 neighbor floor
-  for (let y = 0; y < gridH; y++) {
-    for (let x = 0; x < gridW; x++) {
-      if (!grid[y][x]) continue;
-      // skip tiles that belong to a room
-      if (isPositionInRoom(x, y, rooms)) continue;
-
-      let neighbors = 0;
-      const dirs = [
-        [0, -1],
-        [1, 0],
-        [0, 1],
-        [-1, 0]
-      ];
-      for (const [dx, dy] of dirs) {
-        const nx = x + dx, ny = y + dy;
-        if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
-        if (grid[ny][nx]) neighbors++;
-      }
-
-      // if this corridor tile only touches 0 or 1 floor tiles, it's an isolated 1x1 stub
-      if (neighbors <= 1) {
-        grid[y][x] = 0;
+  // ---- 5. Cleanup: remove dead-end stubs left by widening ------------------
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let y = 0; y < gridH; y++) {
+      for (let x = 0; x < gridW; x++) {
+        if (!grid[y][x] || isRoom(x, y)) continue;
+        let n = 0;
+        for (const q of DIRS) {
+          const nx = x + q.dx, ny = y + q.dy;
+          if (nx >= 0 && ny >= 0 && nx < gridW && ny < gridH && grid[ny][nx]) n++;
+        }
+        if (n <= 1) { grid[y][x] = 0; changed = true; }
       }
     }
   }
 
-  // After corridors + cleanup, detect a single entrance per room where the room wall
-  // touches a non-room floor (corridor) tile. Every such contact becomes either a
-  // door or a solid wall edge so room perimeters are fully closed.
+  // ---- 6. Doors -----------------------------------------------------------
+  // Every spot where a corridor touches a room wall is either the one door for that
+  // contiguous contact run, or a solid wall edge (blockedDoorEdges).
   const doors = [];
   const blockedDoorEdges = [];
+  const doorKeys = new Set();
 
-  for (let ri = 0; ri < rooms.length; ri++) {
-    const r = rooms[ri];
-    const candidates = [];
+  const sideCells = (r, dir) => {
+    const cells = [];
+    if (dir === 'N') for (let x = r.x; x < r.x + r.w; x++) cells.push({ x, y: r.y });
+    if (dir === 'S') for (let x = r.x; x < r.x + r.w; x++) cells.push({ x, y: r.y + r.h - 1 });
+    if (dir === 'W') for (let y = r.y; y < r.y + r.h; y++) cells.push({ x: r.x, y });
+    if (dir === 'E') for (let y = r.y; y < r.y + r.h; y++) cells.push({ x: r.x + r.w - 1, y });
+    return cells;
+  };
 
-    // top edge (outside is north)
-    {
-      const yInside = r.y;
-      const yOutside = r.y - 1;
-      if (yOutside >= 0) {
-        for (let x = r.x; x < r.x + r.w; x++) {
-          if (!grid[yInside][x]) continue;
-          if (grid[yOutside][x] && !isPositionInRoom(x, yOutside, rooms)) {
-            candidates.push({ x, y: yInside, dir: 'N' });
-          }
-        }
+  for (const r of rooms) {
+    for (const q of DIRS) {
+      let run = [];
+      const flush = () => {
+        if (!run.length) return;
+        const pick = run[randInt(0, run.length - 1)];
+        doors.push({ x: pick.x, y: pick.y, dir: q.dir, room: r.id });
+        doorKeys.add(`${pick.x},${pick.y},${q.dir}`);
+        for (const c of run) if (c !== pick) blockedDoorEdges.push({ x: c.x, y: c.y, dir: q.dir, room: r.id });
+        run = [];
+      };
+      for (const c of sideCells(r, q.dir)) {
+        const ox = c.x + q.dx, oy = c.y + q.dy;
+        const touches = ox >= 0 && oy >= 0 && ox < gridW && oy < gridH && grid[oy][ox] && !isRoom(ox, oy);
+        if (touches) run.push(c); else flush();
       }
-    }
-
-    // bottom edge (outside is south)
-    {
-      const yInside = r.y + r.h - 1;
-      const yOutside = r.y + r.h;
-      if (yOutside < gridH) {
-        for (let x = r.x; x < r.x + r.w; x++) {
-          if (!grid[yInside][x]) continue;
-          if (grid[yOutside][x] && !isPositionInRoom(x, yOutside, rooms)) {
-            candidates.push({ x, y: yInside, dir: 'S' });
-          }
-        }
-      }
-    }
-
-    // left edge (outside is west)
-    {
-      const xInside = r.x;
-      const xOutside = r.x - 1;
-      if (xOutside >= 0) {
-        for (let y = r.y; y < r.y + r.h; y++) {
-          if (!grid[y][xInside]) continue;
-          if (grid[y][xOutside] && !isPositionInRoom(xOutside, y, rooms)) {
-            candidates.push({ x: xInside, y, dir: 'W' });
-          }
-        }
-      }
-    }
-
-    // right edge (outside is east)
-    {
-      const xInside = r.x + r.w - 1;
-      const xOutside = r.x + r.w;
-      if (xOutside < gridW) {
-        for (let y = r.y; y < r.y + r.h; y++) {
-          if (!grid[y][xInside]) continue;
-          if (grid[y][xOutside] && !isPositionInRoom(xOutside, y, rooms)) {
-            candidates.push({ x: xInside, y, dir: 'E' });
-          }
-        }
-      }
-    }
-
-    // Group corridor contacts by direction and contiguous hallway segments,
-    // then place at most one door per segment; the rest become solid walls.
-    if (candidates.length) {
-      const byDir = { N: [], S: [], E: [], W: [] };
-      for (const c of candidates) {
-        byDir[c.dir].push(c);
-      }
-
-      function processSegment(seg) {
-        if (!seg.length) return;
-        const chosen = seg[rand(0, seg.length - 1)];
-        doors.push({
-          x: chosen.x,
-          y: chosen.y,
-          dir: chosen.dir,
-          room: ri
-        });
-        for (const other of seg) {
-          if (other === chosen) continue;
-          blockedDoorEdges.push({
-            x: other.x,
-            y: other.y,
-            dir: other.dir,
-            room: ri
-          });
-        }
-      }
-
-      // For N/S walls, contiguous segments are runs of x; for E/W, runs of y.
-      for (const dir of ['N', 'S']) {
-        const list = byDir[dir];
-        if (!list.length) continue;
-        list.sort((a, b) => a.x - b.x);
-        let seg = [list[0]];
-        for (let i = 1; i < list.length; i++) {
-          const prev = list[i - 1];
-          const cur = list[i];
-          if (cur.x === prev.x + 1) {
-            seg.push(cur);
-          } else {
-            processSegment(seg);
-            seg = [cur];
-          }
-        }
-        processSegment(seg);
-      }
-
-      for (const dir of ['E', 'W']) {
-        const list = byDir[dir];
-        if (!list.length) continue;
-        list.sort((a, b) => a.y - b.y);
-        let seg = [list[0]];
-        for (let i = 1; i < list.length; i++) {
-          const prev = list[i - 1];
-          const cur = list[i];
-          if (cur.y === prev.y + 1) {
-            seg.push(cur);
-          } else {
-            processSegment(seg);
-            seg = [cur];
-          }
-        }
-        processSegment(seg);
-      }
+      flush();
     }
   }
 
-  // NEW: Add a single 1x1 room (alcove) connected to a hallway.
-  // It must be adjacent to a hallway tile, but not a room tile.
-  // This room is NOT added to the 'rooms' list, so no notebooks/enemies spawn there.
-  let specialRoom = null;
-  const candidates = [];
+  // ---- 7. Validate: can every room be reached through doors only? ----------
+  const seen = new Uint8Array(gridW * gridH);
+  const stack = [[rooms[0].x, rooms[0].y]];
+  seen[rooms[0].y * W + rooms[0].x] = 1;
+  while (stack.length) {
+    const [x, y] = stack.pop();
+    const here = isRoom(x, y);
+    for (let i = 0; i < 4; i++) {
+      const q = DIRS[i];
+      const nx = x + q.dx, ny = y + q.dy;
+      if (nx < 0 || ny < 0 || nx >= gridW || ny >= gridH) continue;
+      if (!grid[ny][nx] || seen[ny * W + nx]) continue;
+      const there = isRoom(nx, ny);
+      if (here && !there && !doorKeys.has(`${x},${y},${q.dir}`)) continue;
+      if (!here && there && !doorKeys.has(`${nx},${ny},${DIRS[(i + 2) & 3].dir}`)) continue;
+      seen[ny * W + nx] = 1;
+      stack.push([nx, ny]);
+    }
+  }
+  const reached = rooms.filter((r) => seen[r.y * W + r.x]).length;
 
+  // ---- 8. One dead-end alcove (not a "room": no spawns) --------------------
+  // Must be a clean notch: exactly one hallway neighbour, nothing else nearby,
+  // and not touching any room wall.
+  let specialRoom = null;
+  const alcoves = [];
   for (let y = 1; y < gridH - 1; y++) {
     for (let x = 1; x < gridW - 1; x++) {
-      if (grid[y][x] !== 0) continue; // must be empty space
-
-      // Check neighbors
-      let hallwayNeighbors = 0;
-      let isValid = true;
-      const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
-
-      for (const [dx, dy] of dirs) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (grid[ny][nx] !== 0) {
-          // neighbor is floor. Is it a room?
-          if (isPositionInRoom(nx, ny, rooms)) {
-            isValid = false; // Don't attach to a room directly
-            break;
-          }
-          hallwayNeighbors++;
+      if (grid[y][x] || blocked[y * W + x]) continue;
+      let hall = null, count = 0, ok = true;
+      for (const q of DIRS) {
+        if (!grid[y + q.dy][x + q.dx]) continue;
+        if (isRoom(x + q.dx, y + q.dy)) { ok = false; break; }
+        hall = q;
+        count++;
+      }
+      if (!ok || count !== 1) continue;
+      for (let dy = -1; dy <= 1 && ok; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if ((dx || dy) && grid[y + dy][x + dx] && dx * hall.dx + dy * hall.dy <= 0) { ok = false; break; }
         }
       }
-
-      // Valid if exactly one hallway neighbor (creates a dead-end alcove)
-      if (isValid && hallwayNeighbors === 1) candidates.push({ x, y });
+      if (ok) alcoves.push({ x, y, hall });
     }
   }
-
-  if (candidates.length > 0) {
-    const choice = candidates[Math.floor(Math.random() * candidates.length)];
-    grid[choice.y][choice.x] = 1;
-    specialRoom = { x: choice.x, y: choice.y, w: 1, h: 1 };
-
-    // Find the single hallway neighbor to place a door
-    const dirs = [
-      { dx: 0, dy: -1, dir: 'N' },
-      { dx: 0, dy: 1, dir: 'S' },
-      { dx: -1, dy: 0, dir: 'W' },
-      { dx: 1, dy: 0, dir: 'E' }
-    ];
-    for (const d of dirs) {
-      const nx = choice.x + d.dx;
-      const ny = choice.y + d.dy;
-      // Neighbor must be floor and not a room (hallway)
-      if (grid[ny][nx] && !isPositionInRoom(nx, ny, rooms)) {
-        doors.push({
-          x: choice.x,
-          y: choice.y,
-          dir: d.dir,
-          room: -1 // Special ID
-        });
-        break;
-      }
-    }
+  if (alcoves.length) {
+    const a = alcoves[randInt(0, alcoves.length - 1)];
+    grid[a.y][a.x] = 1;
+    specialRoom = { x: a.x, y: a.y, w: 1, h: 1 };
+    doors.push({ x: a.x, y: a.y, dir: a.hall.dir, room: -1 });
   }
 
-  return { grid, rooms, doors, blockedDoorEdges, specialRoom };
+  return {
+    level: { grid, rooms, doors, blockedDoorEdges, specialRoom },
+    reached,
+    total: rooms.length,
+  };
 }

@@ -13,26 +13,11 @@
       }
     }
     </script>
-    <link rel="preload" as="audio" href="./35f37130-9444-4e22-bbe3-982795157c9a.wav">
-    <link rel="preload" as="audio" href="./room-with-buzz-incandescent-light-bulb-23892.mp3">
-    <link rel="preload" as="audio" href="./GAHHH.wav">
-    <link rel="preload" as="audio" href="./ItReallyGetsBalder.wav">
-    <link rel="preload" as="audio" href="./paper-rustle-81855.mp3">
-    <link rel="preload" as="audio" href="./bbbbb.wav">
-    <link rel="preload" as="audio" href="./door-opening-397990.mp3">
-    <link rel="preload" as="audio" href="./close-door-382723.mp3">
-    <link rel="preload" as="audio" href="./soda-can-open-183214.mp3">
-    <link rel="preload" as="audio" href="./wind_howling_02-78263.mp3">
-    <link rel="preload" as="audio" href="./plastic-crunch-83779.mp3">
-    <link rel="preload" as="audio" href="./beep-329314.mp3">
-    <link rel="preload" as="audio" href="./AAAAAAAAAAAAAAAAAAH.wav">
-    <link rel="preload" as="audio" href="./spray-bottle-36050.mp3">
   </head>
 
   <body>
     <canvas id="c"></canvas>
     <canvas id="minimap" width="240" height="240"></canvas>
-    <img id="watermark" src="./assets/img/watermark.png" alt="Unregistered HyperCam 2 watermark">
     <div id="notebookCounter"></div>
 
     <!-- Points HUD: bottom-center main label + floating earned text -->
@@ -43,7 +28,7 @@
     <div id="seedDisplay"></div>
     <div id="difficultyDisplay"></div>
     <div id="floorDisplay"></div>
-    <div id="fpsDisplay">fps: 0</div>
+    <div id="fpsDisplay">0fps</div>
     <div id="restartConfirm">are you sure? press r to restart</div>
     <!-- pause overlay -->
     <div id="pauseOverlay">
@@ -128,9 +113,6 @@
 
       <button id="showInfoToggleButton">enable info display</button>
       <button id="playButton">play</button>
-      <button id="levelEditorButton"
-        style="position: absolute; bottom: 22%; left: 40%; z-index: 210; background: transparent; border: none; color: #000; font-family: 'Times New Roman', serif; font-size: 20px; transform: scale(1.6); cursor: pointer; padding:6px; text-transform: lowercase;">level
-        editor</button>
       <button id="modeToggleButton">switch to hd</button>
       <button id="loudnessToggleButton">disable loudness</button>
       <button id="peacefulModeButton">peaceful: off</button>
@@ -139,60 +121,134 @@
     </div>
 
     <!-- Mod Menu (toggle with backtick ` ) -->
-    <div id="modMenu"
-      style="display:none; position:fixed; left:12px; top:12px; z-index:500; background:rgba(0,0,0,0.85); color:#fff; padding:10px; border:1px solid #666; font-family:TimesNewRoman, serif; transform:scale(1.2);">
-      <div style="font-size:16px; margin-bottom:8px;">mod menu</div>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modInvincible" /> god
-        mode</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modSuperSpeed" /> super
-        speed</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modInfItems" /> inf
-        items</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modInfStamina" /> inf
-        stamina</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modBaldiIcon" /> baldi icon on
-        minimap</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modPrincipalIgnore" />
-        Principal ignores player</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modBullyNoSteal" /> Bully
-        ignores player</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modNoclip" /> noclip</label>
-      <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modAutoplay" /> autoplay
-        (experimental)</label>
+    <div id="modMenu" style="display:none;" role="dialog" aria-label="Mod menu">
+      <div id="modMenuHeader">
+        <span>mod menu</span>
+        
+      </div>
+      <input id="modSearch" type="search" placeholder="filter options..." autocomplete="off" />
 
-      <!-- NEW: Item spawn controls -->
-      <div style="margin-top:8px; display:flex; gap:6px; align-items:center;">
-        <select id="modItemSelect"
-          style="background:rgba(255,255,255,0.06); color:#fff; border:1px solid #444; padding:4px;">
-          <option value="blue_soda">Blue Soda</option>
-          <option value="purple_chocolate">Purple Chocolate</option>
-          <option value="walkie_talkie">Walkie Talkie</option>
-          <option value="wd40">WD40</option>
-          <option value="old_boots">Old Boots</option>
-          <option value="point_orange">Point (Orange)</option>
-          <option value="point_green">Point (Green)</option>
-          <option value="point_pink">Point (Pink)</option>
-          <option value="point_mega">Point (Mega)</option>
-        </select>
-        <button id="modGetItemBtn"
-          style="padding:4px 8px; border:1px solid #666; background:transparent; color:#fff; cursor:pointer;">get
-          item</button>
+      <div id="modMenuBody">
+        <details class="mod-section" open>
+          <summary>player</summary>
+          <label class="mod-row"><input type="checkbox" id="modInvincible" /><span>god mode</span></label>
+          <label class="mod-row"><input type="checkbox" id="modSuperSpeed" /><span>super speed</span></label>
+          <label class="mod-row"><input type="checkbox" id="modInfStamina" /><span>inf stamina</span></label>
+          <label class="mod-row"><input type="checkbox" id="modNoclip" /><span>noclip</span></label>
+        </details>
+
+        <details class="mod-section">
+          <summary>characters</summary>
+          <label class="mod-row"><input type="checkbox" id="modPrincipalIgnore" /><span>principal ignores player</span></label>
+          <label class="mod-row"><input type="checkbox" id="modBullyNoSteal" /><span>bully ignores player</span></label>
+        </details>
+
+        <details class="mod-section">
+          <summary>display</summary>
+          <label class="mod-row"><input type="checkbox" id="modNoDarkBtn" /><span>full bright</span></label>
+          <label class="mod-row"><input type="checkbox" id="modBaldiIcon" /><span>baldi icon on minimap</span></label>
+        </details>
+
+        <details class="mod-section">
+          <summary>items</summary>
+          <label class="mod-row"><input type="checkbox" id="modInfItems" /><span>inf items</span></label>
+          <div class="mod-item-row">
+            <select id="modItemSelect">
+              <optgroup label="items">
+                <option value="blue_soda">Blue Soda</option>
+                <option value="purple_chocolate">Purple Chocolate</option>
+                <option value="walkie_talkie">Walkie Talkie</option>
+                <option value="wd40">WD40</option>
+                <option value="old_boots">Old Boots</option>
+              </optgroup>
+              <optgroup label="points">
+                <option value="point_orange">Point (Orange)</option>
+                <option value="point_green">Point (Green)</option>
+                <option value="point_pink">Point (Pink)</option>
+                <option value="point_mega">Point (Mega)</option>
+              </optgroup>
+            </select>
+            <button id="modGetItemBtn" class="mod-btn">get item</button>
+          </div>
+        </details>
+
+        <details class="mod-section">
+          <summary>world</summary>
+          <button id="modTpNotebooksBtn" class="mod-btn">tp notebooks to player</button>
+          <button id="modNextLevelBtn" class="mod-btn">next level</button>
+        </details>
+
+        <div id="modNoMatch">no options match</div>
       </div>
 
-      <!-- NEW: Utility buttons -->
-      <div style="margin-top:8px; display:flex; gap:6px; flex-direction:column;">
-        <button id="modTpNotebooksBtn"
-          style="padding:6px; border:1px solid #666; background:transparent; color:#fff; cursor:pointer;">tp notebooks to
-          player</button>
-        <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="modNoDarkBtn" /> Full
-          Bright</label>
-        <button id="modNextLevelBtn"
-          style="padding:6px; border:1px solid #666; background:transparent; color:#fff; cursor:pointer;">next
-          level</button>
-      </div>
-
-      <div style="font-size:12px; opacity:0.8; margin-top:8px;">toggle with ` (backtick)</div>
+      <div id="modMenuFooter">` to toggle</div>
     </div>
+    <script>
+      // Mod menu UI only (drag, filter, remember position/sections). Game logic stays in main.js.
+      (function () {
+        var menu = document.getElementById('modMenu');
+        var header = document.getElementById('modMenuHeader');
+        var search = document.getElementById('modSearch');
+        var sections = menu.querySelectorAll('.mod-section');
+        var noMatch = document.getElementById('modNoMatch');
+        var KEY = 'modMenuUI';
+        var saved = {};
+        try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+        function save() { try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {} }
+
+        // restore position (clamped to viewport) and collapsed sections
+        if (typeof saved.x === 'number') {
+          menu.style.left = Math.max(0, Math.min(saved.x, innerWidth - 80)) + 'px';
+          menu.style.top = Math.max(0, Math.min(saved.y, innerHeight - 40)) + 'px';
+        }
+        sections.forEach(function (s, i) {
+          if (saved.open) s.open = saved.open.indexOf(i) !== -1;
+          s.addEventListener('toggle', function () {
+            saved.open = [];
+            sections.forEach(function (t, j) { if (t.open) saved.open.push(j); });
+            save();
+          });
+        });
+
+        // drag by header
+        var drag = null;
+        header.addEventListener('pointerdown', function (e) {
+          var r = menu.getBoundingClientRect();
+          drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+          header.setPointerCapture(e.pointerId);
+        });
+        header.addEventListener('pointermove', function (e) {
+          if (!drag) return;
+          var x = Math.max(0, Math.min(e.clientX - drag.dx, innerWidth - 80));
+          var y = Math.max(0, Math.min(e.clientY - drag.dy, innerHeight - 40));
+          menu.style.left = x + 'px';
+          menu.style.top = y + 'px';
+          saved.x = x; saved.y = y;
+        });
+        header.addEventListener('pointerup', function () { if (drag) { drag = null; save(); } });
+
+        // filter
+        search.addEventListener('input', function () {
+          var q = search.value.trim().toLowerCase();
+          var anyShown = false;
+          sections.forEach(function (s) {
+            var shown = 0;
+            s.querySelectorAll('.mod-row, .mod-item-row, .mod-btn').forEach(function (el) {
+              if (el.closest('.mod-item-row') && el.classList.contains('mod-btn')) return;
+              var hit = !q || el.textContent.toLowerCase().indexOf(q) !== -1;
+              el.style.display = hit ? '' : 'none';
+              if (hit) shown++;
+            });
+            s.style.display = shown ? '' : 'none';
+            if (q && shown) s.open = true;
+            if (shown) anyShown = true;
+          });
+          noMatch.style.display = anyShown ? 'none' : 'block';
+        });
+        // keep typing in the search box from triggering game hotkeys
+        search.addEventListener('keydown', function (e) { if (e.key !== '`') e.stopPropagation(); });
+      })();
+    </script>
 
     <!-- inventory hud -->
     <div id="inventory">

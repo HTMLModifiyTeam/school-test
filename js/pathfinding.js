@@ -1,5 +1,31 @@
 import { isPositionInRoom } from './utils.js';
 
+// Neighbour order matters for tie-breaking between equally short paths.
+const DIRS = [
+  { dx: 1, dy: 0 },
+  { dx: -1, dy: 0 },
+  { dx: 0, dy: 1 },
+  { dx: 0, dy: -1 }
+];
+
+/**
+ * Converts a grid coordinate to a world position (centered in the tile).
+ * Logic matches main.js centering: (index - size/2 + 0.5) * tileSize
+ * @param {number} gx - Grid X
+ * @param {number} gy - Grid Y
+ * @param {number} width - Grid width
+ * @param {number} height - Grid height
+ * @param {number} tileSize - Size of one tile in world units
+ * @returns {{x: number, y: number, z: number}}
+ */
+export function gridToWorld(gx, gy, width, height, tileSize) {
+  return {
+    x: (gx - width / 2 + 0.5) * tileSize,
+    y: 0,
+    z: (gy - height / 2 + 0.5) * tileSize
+  };
+}
+
 /**
  * Picks a random position on the grid that corresponds to a hallway (floor but not in a room).
  * @param {Array<Array<number>>} grid - The maze grid
@@ -7,7 +33,7 @@ import { isPositionInRoom } from './utils.js';
  * @param {number} width - Grid width
  * @param {number} height - Grid height
  * @param {number} tileSize - Size of one tile in world units
- * @param {function} rng - Random number generator function
+ * @param {function} rng - Random number generator function returning [0, 1)
  * @returns {{x: number, y: number, z: number}|null} - World position {x,y,z} or null
  */
 export function getRandomHallwayPosition(grid, rooms, width, height, tileSize, rng = Math.random) {
@@ -21,19 +47,15 @@ export function getRandomHallwayPosition(grid, rooms, width, height, tileSize, r
   }
 
   if (!hallwayTiles.length) return null;
-  const choice = hallwayTiles[Math.floor(rng() * hallwayTiles.length)];
 
-  // Convert to world coordinates (centered in tile)
-  // Logic matches main.js centering: (index - width/2 + 0.5) * tileSize
-  return {
-    x: (choice.x - width / 2 + 0.5) * tileSize,
-    y: 0,
-    z: (choice.y - height / 2 + 0.5) * tileSize
-  };
+  // Math.min guards against an rng that can return exactly 1
+  const index = Math.min(hallwayTiles.length - 1, Math.floor(rng() * hallwayTiles.length));
+  const choice = hallwayTiles[index];
+  return gridToWorld(choice.x, choice.y, width, height, tileSize);
 }
 
 /**
- * Simple 4-directional BFS to get next step towards a goal on the maze grid.
+ * Simple 4-directional BFS to get the next step towards a goal on the maze grid.
  * @param {number} startX - Starting grid X
  * @param {number} startY - Starting grid Y
  * @param {number} goalX - Goal grid X
@@ -41,54 +63,58 @@ export function getRandomHallwayPosition(grid, rooms, width, height, tileSize, r
  * @param {Array<Array<number>>} grid - 2D grid array (row-major: grid[y][x])
  * @param {number} width - Grid width
  * @param {number} height - Grid height
- * @param {Set<string>} blockedPathSet - Set of blocked edges "x1,y1|x2,y2"
+ * @param {Set<string>} [blockedPathSet] - Set of blocked directed edges "x1,y1|x2,y2"
  * @returns {{x: number, y: number}|null} - The next grid coordinate to move to, or null if no path/reached.
  */
 export function findNextStep(startX, startY, goalX, goalY, grid, width, height, blockedPathSet) {
-  if (startX === goalX && startY === goalY) return null;
   const inBounds = (x, y) => x >= 0 && x < width && y >= 0 && y < height;
-  const isWalkable = (x, y) => inBounds(x, y) && grid[y][x];
 
-  if (!isWalkable(goalX, goalY)) return null;
+  // Out-of-bounds start/goal would otherwise throw on grid/visited access
+  if (!inBounds(startX, startY) || !inBounds(goalX, goalY)) return null;
+  if (startX === goalX && startY === goalY) return null;
+  if (!grid[goalY][goalX]) return null;
 
-  const visited = new Array(height);
-  
-  for (let y = 0; y < height; y++) visited[y] = new Array(width).fill(false);
-  
-  const queue = [{ x: startX, y: startY }];
-  visited[startY][startX] = true;
+  // Flat typed arrays: no per-node objects or string keys, and an O(1) queue
+  // (the old Array.shift() was O(n) per dequeue).
+  const size = width * height;
+  const startIdx = startY * width + startX;
+  const goalIdx = goalY * width + goalX;
+  const parent = new Int32Array(size).fill(-1);
+  const visited = new Uint8Array(size);
+  const queue = new Int32Array(size);
+  let head = 0;
+  let tail = 0;
 
-  const parent = new Map();
-  const key = (x, y) => `${x},${y}`;
+  visited[startIdx] = 1;
+  queue[tail++] = startIdx;
 
-  while (queue.length) {
-    const cur = queue.shift();
-    if (cur.x === goalX && cur.y === goalY) {
-      let cx = goalX;
-      let cy = goalY;
-      let prev = parent.get(key(cx, cy));
-      let last = { x: cx, y: cy };
-      while (prev && !(prev.x === startX && prev.y === startY)) {
-        last = prev;
-        prev = parent.get(key(prev.x, prev.y));
-      }
-      return last;
-    }
+  while (head < tail) {
+    const cur = queue[head++];
+    const cx = cur % width;
+    const cy = (cur - cx) / width;
 
-    for (const d of [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }]) {
-      const nx = cur.x + d.dx;
-      const ny = cur.y + d.dy;
-      if (!isWalkable(nx, ny)) continue;
+    for (const { dx, dy } of DIRS) {
+      const nx = cx + dx;
+      const ny = cy + dy;
+      if (!inBounds(nx, ny) || !grid[ny][nx]) continue;
+
+      const next = ny * width + nx;
+      if (visited[next]) continue;
 
       // Treat blocked door edges as walls for pathfinding
-      if (blockedPathSet && blockedPathSet.has(`${cur.x},${cur.y}|${nx},${ny}`)) continue;
+      if (blockedPathSet && blockedPathSet.has(`${cx},${cy}|${nx},${ny}`)) continue;
 
-      if (visited[ny][nx]) continue;
-      visited[ny][nx] = true;
-      parent.set(key(nx, ny), { x: cur.x, y: cur.y });
-      queue.push({ x: nx, y: ny });
+      visited[next] = 1;
+      parent[next] = cur;
+
+      if (next === goalIdx) {
+        // Walk back until the node whose parent is the start: that's the first step
+        let step = next;
+        while (parent[step] !== startIdx) step = parent[step];
+        return { x: step % width, y: Math.floor(step / width) };
+      }
+      queue[tail++] = next;
     }
   }
   return null;
 }
-

@@ -1,17 +1,23 @@
 import * as THREE from 'three';
+import Minimap from './js/minimap.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { generateRooms } from './js/maze.js';
 import { findNextStep, getRandomHallwayPosition } from './js/pathfinding.js';
-import { isPositionInRoom, pointTex } from './js/utils.js';
-import { ImageCache } from './js/cache.js';
-import { IMG_CACHE } from './js/data.js';
+import { isPositionInRoom, pointTex, DIRS } from './js/utils.js';
+import { ImageCache, AudioCache } from './js/cache.js';
+import { IMG_CACHE, AUDIO_CACHE } from './js/data.js';
+
+const DEBUG = false;
+const isMobile = navigator.maxTouchPoints > 0;
 
 const canvas = document.getElementById('c');
+let PR = Math.min(window.devicePixelRatio || 1, 2);
 
 // Caching Image and Audio.
 const images = new ImageCache(IMG_CACHE, { root: 'assets/img' });
 const CACHED_IMG = await images.load();
-console.log(CACHED_IMG);
+const audios = new AudioCache(AUDIO_CACHE, { root: 'assets/audio' });
+await audios.load();
 
 // Scene, camera, and controls must exist before we configure the renderer
 const scene = new THREE.Scene();
@@ -47,9 +53,7 @@ let targetDelta = 1 / 60;
 // apply renderer settings based on current mode
 function applyRenderMode() {
   // resolution: lower for performance, higher for HD
-  const basePixelRatio = Math.min(2, window.devicePixelRatio);
-  const scale = isHdMode ? 1.0 : 0.7;
-  renderer.setPixelRatio(basePixelRatio * scale);
+  renderer.setPixelRatio(PR * (isHdMode ? 1.0 : 0.7));
   renderer.setSize(innerWidth, innerHeight);
 
   // Precompile shaders for the current scene/camera to avoid first-look stutters
@@ -164,7 +168,7 @@ function showPointsEarned(deltaCount = 1) {
   }, 500);
 }
 
-if (navigator.maxTouchPoints > 0) {
+if (isMobile) {
   if (pauseButtonEl) pauseButtonEl.style.display = 'block';
   if (lookBehindButtonEl) lookBehindButtonEl.style.display = 'flex';
   if (joystickEl) joystickEl.style.display = 'block';
@@ -179,8 +183,6 @@ let isGameOver = false;
 let isGameWon = false;
 let isMainMenu = true;
 
-let detentionTimeout;
-
 // NEW: input buffer to prevent interaction during load
 let inputReady = false;
 // NEW: debug mode
@@ -193,15 +195,12 @@ let modInfItems = false;
 let modInfStamina = false;
 let modBaldiIcon = false;
 let modPrincipalIgnore = false;
-// Prevent bully (Bob) from stealing player's inventory
 let modBullyNoSteal = false;
 let modNoDarkness = false;
-let modAutoplay = false; // experimental: AI-driven player movement to notebooks/exits
 let modNoclip = false;
 
 // expose simple toggles from the DOM (connected after DOM ready)
 function setupModMenuBindings() {
-  const menu = document.getElementById('modMenu');
   const inv = document.getElementById('modInvincible');
   const spd = document.getElementById('modSuperSpeed');
   const infIt = document.getElementById('modInfItems');
@@ -221,18 +220,6 @@ function setupModMenuBindings() {
     noclipChk.addEventListener('change', (e) => {
       e.stopPropagation();
       modNoclip = !!noclipChk.checked;
-    });
-  }
-
-  // NEW: autoplay checkbox binding (experimental)
-  const autoplayChk = document.getElementById('modAutoplay');
-  if (autoplayChk) {
-    autoplayChk.checked = !!modAutoplay;
-    autoplayChk.addEventListener('change', (e) => {
-      e.stopPropagation();
-      modAutoplay = !!autoplayChk.checked;
-      // disable pointer lock while autoplay to keep UI stable
-      if (modAutoplay) try { controls.unlock(); } catch (err) { }
     });
   }
 
@@ -292,7 +279,7 @@ function setupModMenuBindings() {
     itemGroup.add(mesh);
     itemStates.push({ mesh, type, roomIndex: null, baseY: wallHeight / 2 });
     // immediate HUD feedback
-    try { notebookPickupSound.currentTime = 0; notebookPickupSound.play(); } catch (e) { }
+    try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
   }
 
   if (getItemBtn) {
@@ -319,7 +306,7 @@ function setupModMenuBindings() {
       }
       // ensure counter and visuals update
       updateNotebookCounter();
-      try { walkieTalkieBeepSound.currentTime = 0; walkieTalkieBeepSound.play(); } catch (e) { }
+      try { audios.play('sfx', 'beep', 1.0, true); } catch { }
     });
   }
 
@@ -337,6 +324,7 @@ function setupModMenuBindings() {
 
   if (nextLevelBtn) {
     nextLevelBtn.addEventListener('click', (e) => {
+      console.log("skipped level");
       e.stopPropagation();
       try {
         triggerWin();
@@ -358,9 +346,7 @@ document.addEventListener('keydown', (e) => {
       const cb = menu.querySelector('input[type="checkbox"]');
       if (cb) cb.focus();
       setupModMenuBindings();
-    } else {
-      menu.style.display = 'none';
-    }
+    } else menu.style.display = 'none';
     e.preventDefault();
   }
 });
@@ -384,11 +370,8 @@ const lookBehindBaseRotation = new THREE.Euler();
 // NEW: helper to toggle pause state (shared by keyboard and button)
 function togglePause() {
   isPaused = !isPaused;
-  if (isPaused) {
-    pausedLook.copy(camera.rotation);
-  } else {
-    lastFrameTime = performance.now() * 0.001;
-  }
+  if (isPaused) pausedLook.copy(camera.rotation);
+  else lastFrameTime = performance.now() * 0.001;
   if (pauseOverlay) {
     pauseOverlay.style.display = isPaused ? 'flex' : 'none';
     // Reset restart button state when opening/closing pause menu
@@ -588,14 +571,12 @@ canvas.addEventListener('touchmove', (e) => {
     const t = e.changedTouches[i];
     if (t.identifier === lookTouchId) {
       const dx = t.clientX - lookLastX;
-      const dy = t.clientY - lookLastY;
       // Update Y tracking even if unused for look, to keep state consistent
       lookLastX = t.clientX;
       lookLastY = t.clientY;
 
       // Only horizontal look (yaw) allowed on mobile swipe
       camera.rotation.y -= dx * lookSpeed;
-
       break;
     }
   }
@@ -676,12 +657,10 @@ const blockedPathSet = new Set();
 
 function initGame() {
   // Setup RNG
-  let seedVal;
-  if (seedStr === "" || isNaN(parseInt(seedStr, 10))) {
+  let seedVal = 0;
+  if (seedStr === "" || isNaN(parseInt(seedStr, 10)))
     seedVal = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-  } else {
-    seedVal = parseInt(seedStr, 10);
-  }
+  else seedVal = parseInt(seedStr, 10);
   currentActiveSeed = seedVal; // Store for display
 
   // Load persisted points (if any)
@@ -878,7 +857,7 @@ function initGame() {
     const cz = (r.y + r.h / 2 - GH / 2) * TILE;
     const size = wallHeight * 0.9;
     const geom = new THREE.PlaneGeometry(size * 0.6, size);
-    const tex = textureLoader.load(texPath);
+    const tex = loader.load(texPath);
     tex.magFilter = THREE.NearestFilter;
     tex.minFilter = THREE.NearestFilter;
     const mat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
@@ -907,7 +886,7 @@ function initGame() {
   // spawn Principal in the detention room (if available) - only when spawnOthers is enabled
   if (principalRoomIndex !== -1 && spawnOthers) {
     // use provided asset if present
-    spawnNPCAtRoom(principalRoomIndex, './principal schooler.png', 'principal');
+    spawnNPCAtRoom(principalRoomIndex, CACHED_IMG.characters.principal.src, 'principal');
   }
 
   // spawn Bob, Playgirl, Second Prize in random rooms (not the detention one) - controlled by spawnOthers
@@ -915,7 +894,7 @@ function initGame() {
     const otherRoomIndices = rooms.map((r, i) => i).filter(i => i !== principalRoomIndex);
     if (otherRoomIndices.length) {
       // pick up to 3 distinct rooms
-      for (const pair of [['./Bob.png', 'bob'], ['./playgirl.jpg', 'playgirl'], ['./second prize.png', 'second_prize']]) {
+      for (const pair of [[CACHED_IMG.characters.bob.src, 'bob'], [CACHED_IMG.characters.playgirl.src, 'playgirl'], [CACHED_IMG.characters["2nd_prize"].src, 'second_prize']]) {
         if (!otherRoomIndices.length) break;
         const idx = Math.floor(rng() * otherRoomIndices.length);
         const ri = otherRoomIndices.splice(idx, 1)[0];
@@ -977,13 +956,7 @@ function initGame() {
       const cx = (x - GW / 2 + 0.5) * TILE;
       const cz = (y - GH / 2 + 0.5) * TILE;
       // check four neighbors; if neighbor is empty -> wall
-      const neighbors = [
-        { dx: 0, dy: -1, dir: 'N' },
-        { dx: 1, dy: 0, dir: 'E' },
-        { dx: 0, dy: 1, dir: 'S' },
-        { dx: -1, dy: 0, dir: 'W' }
-      ];
-      for (const n of neighbors) {
+      for (const n of DIRS) {
         const nx = x + n.dx, ny = y + n.dy;
         const needWall = (nx < 0 || nx >= GW || ny < 0 || ny >= GH) || !grid[ny][nx];
         if (!needWall) continue;
@@ -1208,62 +1181,71 @@ function initGame() {
     colliderBoxes.push(box);
   }
 
-  // Spawn Player
-  if (rooms.length) {
-    // If exits exist, deterministically pick one using the seeded rng and spawn the player
-    // in front of that exit (so the same seed yields the same elevator spawn).
-    let sx = 0, sz = 0;
-    if (exitStates && exitStates.length) {
-      const idx = Math.floor(rng() * exitStates.length);
-      const chosen = exitStates[idx];
-      const exPos = chosen.mesh.position.clone();
-      // mesh.rotation.y is the rotation used when the exit was placed; compute forward vector
-      const ry = chosen.mesh.rotation.y || 0;
-      // exit plane normal (points toward corridor side when placed) => use negative Z math:
-      // forward = (-sin(ry), 0, -cos(ry))
-      const fx = -Math.sin(ry);
-      const fz = -Math.cos(ry);
-      // place player 1.2 units away from the exit face into the hallway
-      // use the opposite direction so the player spawns on the corridor side (in front of the exit)
-      sx = exPos.x - fx * 1.2;
-      sz = exPos.z - fz * 1.2;
-    } else {
-      // fallback: collect corridor tiles that are not in any room
-      const hallwayTiles = [];
-      for (let y = 0; y < GH; y++) {
-        for (let x = 0; x < GW; x++) {
-          if (!grid[y][x]) continue;
-          if (roomAtGrid(x, y)) continue;
-          hallwayTiles.push({ x, y });
-        }
-      }
+  function spawnPlayer() {
+    if (!rooms.length) return;
 
-      if (hallwayTiles.length) {
-        const choice = hallwayTiles[Math.floor(rng() * hallwayTiles.length)];
-        sx = (choice.x - GW / 2 + 0.5) * TILE;
-        sz = (choice.y - GH / 2 + 0.5) * TILE;
-      } else {
-        let best = rooms[0];
-        let bestArea = best.w * best.h;
-        for (let i = 1; i < rooms.length; i++) {
-          const a = rooms[i].w * rooms[i].h;
-          if (a > bestArea) { best = rooms[i]; bestArea = a; }
+    const EYE = 1.6;
+    const tileToWorld = (gx, gy) => ({
+      x: (gx - GW / 2 + 0.5) * TILE,
+      z: (gy - GH / 2 + 0.5) * TILE,
+    });
+    const isFree = (x, z) => typeof collides !== 'function' || !collides(new THREE.Vector3(x, EYE, z));
+    const place = (x, z, yaw) => {
+      controls.object.position.set(x, EYE, z);
+      if (yaw !== undefined) controls.object.rotation.y = yaw;
+    };
+
+    // ---- 1. In front of an exit ----
+    if (exitStates && exitStates.length) {
+      const chosen = exitStates[Math.floor(rng() * exitStates.length)];
+      const ex = chosen.mesh.position;
+      const ry = chosen.mesh.rotation.y || 0;
+
+      // direction pointing from the exit out into the hallway
+      const ox = Math.sin(ry);
+      const oz = Math.cos(ry);
+
+      // original offset was 1.2; widen the search if that spot is blocked
+      for (const m of [1, 0.7, 1.4, 2, 2.8]) {
+        const d = 1.2 * m;
+        const x = ex.x + ox * d;
+        const z = ex.z + oz * d;
+        if (isFree(x, z)) {
+          // camera looks along (-sin yaw, -cos yaw), so face the hallway:
+          place(x, z, Math.atan2(-ox, -oz));
+          return;
         }
-        let gx, gz;
-        if (bestArea > 2) {
-          gx = best.x + best.w / 2;
-          gz = best.y + best.h / 2;
-        } else {
-          gx = GW / 2;
-          gz = GH / 2;
-        }
-        sx = (gx - GW / 2) * TILE;
-        sz = (gz - GH / 2) * TILE;
       }
+      // fall through to the hallway/room fallbacks
     }
 
-    controls.object.position.set(sx, 1.6, sz);
+    // ---- 2. Random free hallway tile ----
+    const hallwayTiles = [];
+    for (let y = 0; y < GH; y++) {
+      for (let x = 0; x < GW; x++) {
+        if (!grid[y][x] || roomAtGrid(x, y)) continue;
+        const p = tileToWorld(x, y);
+        if (isFree(p.x, p.z)) hallwayTiles.push(p);
+      }
+    }
+    if (hallwayTiles.length) {
+      const p = hallwayTiles[Math.floor(rng() * hallwayTiles.length)];
+      place(p.x, p.z);
+      return;
+    }
+
+    // ---- 3. Centre of the largest room ----
+    let best = rooms[0];
+    for (const r of rooms) if (r.w * r.h > best.w * best.h) best = r;
+
+    const area = best.w * best.h;
+    // room/grid centres are in tile-edge coordinates, so no +0.5 here
+    const gx = area > 2 ? best.x + best.w / 2 : GW / 2;
+    const gz = area > 2 ? best.y + best.h / 2 : GH / 2;
+    place((gx - GW / 2) * TILE, (gz - GH / 2) * TILE);
   }
+
+  spawnPlayer();
 
   // Spawn Enemy
   const settings = diffSettings[currentDifficulty];
@@ -1284,23 +1266,18 @@ function initGame() {
     // Restore directional / ambient intensities to defaults
     if (typeof dir !== 'undefined' && dir) dir.intensity = 3.0;
     if (typeof ambientLight !== 'undefined' && ambientLight) ambientLight.intensity = 1.4;
-  } catch (e) { }
+  } catch { }
 
   // Stop any lingering dark-mode ambience or run loop
-  try { windHowlSound.pause(); windHowlSound.currentTime = 0; } catch (e) { }
-  try { runSound.pause(); runSound.currentTime = 0; } catch (e) { }
+  try { audios.stop('sfx', 'wind') } catch { }
+  try { audios.stop('music', 'run') } catch { }
 
   // Reset dark-mode flags so the new floor starts bright
   darkModeApplied = false;
   darkModeSpeedBonus = 0;
 
   // Play the schoolhouse loop when the game initializes; it should run until 2 notebooks are collected.
-  try {
-    schoolhouseSound.currentTime = 0;
-    schoolhouseSound.play();
-  } catch (e) {
-    // ignore autoplay restrictions
-  }
+  try { audios.play('music', 'schoolhouse', .9, true); } catch { }
 
   // NOTE: Enemy (Balder) will NOT spawn at init. It will spawn when exactly 2 notebooks have been collected.
   // This prevents Balder from appearing immediately when play starts.
@@ -1499,19 +1476,14 @@ function enforceTwoNotebookRule() {
     if (notebooksCollected < 2) {
       // Ensure enemy is removed if it somehow exists before threshold
       if (enemyMesh) {
-        try { scene.remove(enemyMesh); } catch (e) { }
+        try { scene.remove(enemyMesh); } catch { }
         enemyMesh = null;
-        try { chaseMusic.pause(); chaseMusic.currentTime = 0; } catch (e) { }
+        try { chaseMusic.pause(); chaseMusic.currentTime = 0; } catch { }
       }
       // Make sure schoolhouse loop plays while under threshold
       try {
-        if (schoolhouseSound.paused) {
-          schoolhouseSound.currentTime = 0;
-          schoolhouseSound.play();
-        }
-      } catch (e) {
-        // ignore autoplay restrictions
-      }
+        if (audios.paused('music', 'schoolhouse')) audios.play('music', 'schoolhouse', 0.9, true);
+      } catch { }
     } else {
       // When threshold met spawn Balder if missing and stop the schoolhouse loop.
       // Spawn only once when hitting the threshold.
@@ -1523,13 +1495,8 @@ function enforceTwoNotebookRule() {
         }
       }
       try {
-        if (!schoolhouseSound.paused) {
-          schoolhouseSound.pause();
-          schoolhouseSound.currentTime = 0;
-        }
-      } catch (e) {
-        // ignore audio errors
-      }
+        if (!audios.paused('music', 'schoolhouse')) audios.stop('music', 'schoolhouse');
+      } catch { }
     }
   } catch (err) {
     // Swallow errors to avoid breaking the main loop
@@ -1553,19 +1520,19 @@ function checkNotebookCompletion() {
   if (notebooksCollected >= 2) {
     // Remove enemy if present
     if (enemyMesh) {
-      try { scene.remove(enemyMesh); } catch (e) { }
+      try { scene.remove(enemyMesh); } catch { }
       enemyMesh = null;
       // stop chase music as enemy is gone
-      try { chaseMusic.pause(); chaseMusic.currentTime = 0; } catch (e) { }
+      try { chaseMusic.pause(); chaseMusic.currentTime = 0; } catch { }
     }
     // Remove NPC group if present
     if (npcGroup) {
-      try { scene.remove(npcGroup); } catch (e) { }
+      try { scene.remove(npcGroup); } catch { }
       npcGroup = null;
       npcStates.length = 0;
     }
     // Stop schoolhouse loop now that threshold is exceeded
-    try { schoolhouseSound.pause(); schoolhouseSound.currentTime = 0; } catch (e) { }
+    try { audios.stop('music', 'schoolhouse') } catch { }
   }
 
   if (notebooksCollected >= totalRooms) {
@@ -1598,21 +1565,11 @@ function checkNotebookCompletion() {
     }
 
     // play wind howling sound
-    try {
-      windHowlSound.currentTime = 0;
-      windHowlSound.play();
-    } catch (e) { }
+    try { audios.play('sfx', 'wind', .85, true); } catch { }
   }
 }
 
 updateNotebookCounter();
-
-// NEW: global audio setup
-// background hum, quiet loop
-const humSound = new Audio('./room-with-buzz-incandescent-light-bulb-23892.mp3');
-humSound.loop = true;
-humSound.volume = 0.18;
-humSound.preload = 'auto';
 
 // Monkey-patch HTMLMediaElement.play to catch and ignore rejected play() promises
 // (prevents "The play() request was interrupted by a call to pause()" unhandledRejection)
@@ -1629,25 +1586,6 @@ humSound.preload = 'auto';
     console.warn('safeAudioPlayPatch failed:', e);
   }
 })();
-
-// Global handler to suppress noisy pointer-lock related promise rejections
-// (e.g. "Pointer lock cannot be acquired immediately after the user has exited the lock")
-// We preventDefault() on unhandledrejection events so they don't appear in console as uncaught.
-window.addEventListener('unhandledrejection', (ev) => {
-  try {
-    // Optionally, filter specific messages if you want to allow other rejections to surface.
-    // For simplicity and robustness across browsers, suppress all unhandled promise rejections here.
-    ev.preventDefault();
-  } catch (err) {
-    // swallow any errors from the handler itself
-  }
-});
-
-// NEW: Schoolhouse looped music that plays until 2 notebooks are collected
-const schoolhouseSound = new Audio('./The schoolhouse.wav');
-schoolhouseSound.loop = true;
-schoolhouseSound.volume = 0.9;
-schoolhouseSound.preload = 'auto';
 
 // NEW: looped RUN.. sound that plays when all notebooks are collected
 const runSound = new Audio('./RUN..wav');
@@ -1784,7 +1722,7 @@ if (playButtonEl) {
     try {
       const selectEl = document.getElementById('levelStartFloorSelect');
       const val = selectEl ? parseInt(selectEl.value, 10) : NaN;
-      currentFloor = (Number.isInteger(val) && val >= 1) ? Math.min(Math.max(val, 1), 20) : 1;
+      currentFloor = (Number.isInteger(val) && val >= 1) ? val : 1;
     } catch (err) {
       currentFloor = 1;
     }
@@ -1793,7 +1731,7 @@ if (playButtonEl) {
     if (mainMenuEl) mainMenuEl.style.display = 'none';
 
     // Show HUD
-    if (minimap) minimap.style.display = 'block';
+    if (minimap) minimap.canvas.style.display = 'block';
     if (inventoryEl) inventoryEl.style.display = 'flex';
 
     isMainMenu = false;
@@ -1806,429 +1744,6 @@ if (playButtonEl) {
   });
 }
 
-// --- Level Editor support ---
-let inLevelEditor = false;
-let editorTool = 'hall'; // 'hall','room','elevator','notebook','item'
-const editorObjects = new Map(); // key "x,y" -> mesh
-
-const levelEditorButtonEl = document.getElementById('levelEditorButton');
-
-function createEditorPanel() {
-  // simple floating panel with 2D + 3D previews
-  let panel = document.getElementById('levelEditorPanel');
-  if (panel) return panel;
-  panel = document.createElement('div');
-  panel.id = 'levelEditorPanel';
-  Object.assign(panel.style, {
-    position: 'fixed',
-    right: '12px',
-    top: '12px',
-    zIndex: 600,
-    background: 'rgba(0,0,0,0.88)',
-    color: '#fff',
-    padding: '10px',
-    fontFamily: 'Times New Roman, serif',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-    border: '1px solid #666',
-    width: '220px'
-  });
-
-  const title = document.createElement('div');
-  title.textContent = 'Level Editor';
-  title.style.fontSize = '16px';
-  title.style.marginBottom = '4px';
-  panel.appendChild(title);
-
-  // Tool buttons + preview area container
-  const toolsRow = document.createElement('div');
-  Object.assign(toolsRow.style, { display: 'flex', gap: '6px', flexWrap: 'wrap' });
-  const tools = ['hall', 'room', 'elevator', 'notebook', 'item'];
-  tools.forEach(t => {
-    const b = document.createElement('button');
-    b.textContent = t;
-    b.dataset.tool = t;
-    Object.assign(b.style, {
-      padding: '6px 8px',
-      cursor: 'pointer',
-      background: 'transparent',
-      color: '#fff',
-      border: '1px solid rgba(255,255,255,0.06)',
-      fontSize: '13px'
-    });
-    b.addEventListener('click', (ev) => {
-      editorTool = t;
-      // highlight selection
-      Array.from(toolsRow.querySelectorAll('button')).forEach(btn => btn.style.outline = '');
-      b.style.outline = '2px solid #fff';
-      updateEditorPreviews(t);
-    });
-    toolsRow.appendChild(b);
-    if (t === editorTool) b.style.outline = '2px solid #fff';
-  });
-  panel.appendChild(toolsRow);
-
-  // Previews container (2D + 3D)
-  const previews = document.createElement('div');
-  Object.assign(previews.style, { display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'space-between' });
-
-  // 2D preview canvas (small)
-  const preview2D = document.createElement('canvas');
-  preview2D.id = 'editor2DPreview';
-  preview2D.width = 88;
-  preview2D.height = 88;
-  Object.assign(preview2D.style, {
-    background: '#111',
-    border: '1px solid rgba(255,255,255,0.06)',
-    imageRendering: 'pixelated'
-  });
-
-  // 3D-ish preview (simple CSS-transformed image to simulate a 3D billboard)
-  const preview3D = document.createElement('div');
-  preview3D.id = 'editor3DPreview';
-  Object.assign(preview3D.style, {
-    width: '88px',
-    height: '88px',
-    background: '#000',
-    border: '1px solid rgba(255,255,255,0.06)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    perspective: '420px',
-    overflow: 'hidden'
-  });
-
-  const preview3DInner = document.createElement('div');
-  preview3DInner.id = 'editor3DInner';
-  Object.assign(preview3DInner.style, {
-    width: '72px',
-    height: '72px',
-    transformStyle: 'preserve-3d',
-    transition: 'transform 220ms ease',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center'
-  });
-  preview3D.appendChild(preview3DInner);
-
-  previews.appendChild(preview2D);
-  previews.appendChild(preview3D);
-  panel.appendChild(previews);
-
-  // Quick action buttons
-  const btnRow = document.createElement('div');
-  Object.assign(btnRow.style, { display: 'flex', gap: '6px', marginTop: '6px' });
-
-  const clearBtn = document.createElement('button');
-  clearBtn.textContent = 'clear markers';
-  Object.assign(clearBtn.style, { padding: '6px', cursor: 'pointer', background: 'transparent', color: '#fff', border: '1px solid #444' });
-  clearBtn.addEventListener('click', () => {
-    for (const m of editorObjects.values()) {
-      if (m && m.parent) scene.remove(m);
-    }
-    editorObjects.clear();
-  });
-  btnRow.appendChild(clearBtn);
-
-  const exitBtn = document.createElement('button');
-  exitBtn.textContent = 'exit editor';
-  Object.assign(exitBtn.style, { padding: '6px', cursor: 'pointer', background: 'transparent', color: '#fff', border: '1px solid #444' });
-  exitBtn.addEventListener('click', () => exitLevelEditor());
-  btnRow.appendChild(exitBtn);
-
-  panel.appendChild(btnRow);
-
-  document.body.appendChild(panel);
-
-  // Helper: mapping tool -> image for the 2D preview
-  const previewMap = {
-    hall: './2025_12_09_0yv_Kleki.png',
-    room: './2025_12_09_0ys_Kleki.png',
-    elevator: './exitt.png',
-    notebook: './2025_12_09_0z4_Kleki (6).png',
-    item: './dither_it_2025_12_10_0is_Kleki.png'
-  };
-
-  // Update function to draw the 2D preview and set a 3D-styled billboard
-  function updateEditorPreviews(tool) {
-    const imgSrc = previewMap[tool] || previewMap['hall'];
-    const img = new Image();
-    img.src = imgSrc;
-    img.onload = () => {
-      // 2D: draw centered, pixelated look
-      const ctx = preview2D.getContext('2d');
-      ctx.clearRect(0, 0, preview2D.width, preview2D.height);
-      // draw a dark framed background
-      ctx.fillStyle = '#0b0b0b';
-      ctx.fillRect(0, 0, preview2D.width, preview2D.height);
-      // compute draw size preserving aspect fit
-      const pad = 8;
-      const w = preview2D.width - pad * 2;
-      const h = preview2D.height - pad * 2;
-      let dw = w, dh = h;
-      if (img.width > img.height) {
-        dh = Math.floor(w * (img.height / img.width));
-      } else {
-        dw = Math.floor(h * (img.width / img.height));
-      }
-      const ox = Math.floor((preview2D.width - dw) / 2);
-      const oy = Math.floor((preview2D.height - dh) / 2);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(img, ox, oy, dw, dh);
-
-      // 3D: set inner element background and apply a subtle tilt to simulate 3D
-      preview3DInner.style.backgroundImage = `url("${imgSrc}")`;
-      preview3DInner.style.backgroundSize = 'cover';
-      preview3DInner.style.backgroundPosition = 'center';
-      // random slight rotation for liveliness
-      preview3DInner.style.transform = `rotateX(18deg) rotateY(-18deg) translateZ(6px)`;
-      // add subtle hover parallax
-      preview3DInner.onmousemove = (ev) => {
-        const r = preview3D.getBoundingClientRect();
-        const cx = r.left + r.width / 2;
-        const cy = r.top + r.height / 2;
-        const rx = (ev.clientX - cx) / (r.width / 2);
-        const ry = (ev.clientY - cy) / (r.height / 2);
-        const tiltX = (ry * 8);
-        const tiltY = (rx * -8);
-        preview3DInner.style.transform = `rotateX(${18 + tiltX}deg) rotateY(${-18 + tiltY}deg) translateZ(6px)`;
-      };
-      preview3DInner.onmouseleave = () => {
-        preview3DInner.style.transform = `rotateX(18deg) rotateY(-18deg) translateZ(6px)`;
-      };
-    };
-    img.onerror = () => {
-      // clear canvases on error
-      const ctx = preview2D.getContext('2d');
-      ctx.clearRect(0, 0, preview2D.width, preview2D.height);
-      preview3DInner.style.backgroundImage = '';
-    };
-  }
-
-  // Initialize previews to current tool
-  updateEditorPreviews(editorTool || 'hall');
-
-  return panel;
-}
-
-function enterLevelEditor() {
-  // Enter a dedicated level-editor state that is separate from normal gameplay.
-  // We do NOT call initGame here — the editor should present an empty playstate
-  // where the world is renderable but game AI and progression are suspended.
-  inLevelEditor = true;
-  isMainMenu = false;
-  // hide main menu but keep canvas active so user can see the world
-  if (mainMenuEl) mainMenuEl.style.display = 'none';
-  // show minimap and inventory for context while editing
-  if (minimap) minimap.style.display = 'block';
-  if (inventoryEl) inventoryEl.style.display = 'flex';
-  // create editor UI panel
-  createEditorPanel();
-  // make the input system ready for editor interactions and allow movement
-  inputReady = true;
-  // allow player movement in editor by keeping updates running but mark editor active
-  isPaused = false;       // allow the normal update loop to run so player can move
-  isGameOver = false;     // editor is not a game-over state
-  isGameWon = false;
-  // release any pointer locks to allow UI interactions
-  try { controls.unlock(); } catch (e) { }
-  // hide in-game overlays that would interfere
-  if (pauseOverlay) pauseOverlay.style.display = 'none';
-  if (winOverlay) winOverlay.style.display = 'none';
-}
-
-function exitLevelEditor() {
-  inLevelEditor = false;
-  // remove panel
-  const panel = document.getElementById('levelEditorPanel');
-  if (panel) panel.remove();
-  // return to main menu
-  goToMainMenu();
-}
-
-// map editor tool -> color
-const editorColors = {
-  hall: 0x999999,
-  room: 0x44aa44,
-  elevator: 0xffaa00,
-  notebook: 0xffff66,
-  item: 0x88ccff
-};
-
-function placeEditorMarkerAtGrid(gx, gy, type) {
-  const key = `${gx},${gy}`;
-  // remove existing marker for that key (we will replace)
-  if (editorObjects.has(key)) {
-    const old = editorObjects.get(key);
-    if (old && old.parent) scene.remove(old);
-    editorObjects.delete(key);
-  }
-
-  // small box for marker
-  const size = TILE * 0.6;
-  const geo = new THREE.BoxGeometry(size, 0.4, size);
-  const mat = new THREE.MeshStandardMaterial({ color: editorColors[type] || 0xffffff });
-  const mesh = new THREE.Mesh(geo, mat);
-  const wx = (gx - GW / 2 + 0.5) * TILE;
-  const wz = (gy - GH / 2 + 0.5) * TILE;
-  mesh.position.set(wx, 0.2, wz);
-  mesh.userData.editorType = type;
-  scene.add(mesh);
-  editorObjects.set(key, mesh);
-
-  // Also apply the selected placement to the game world:
-  // - hall: carve a floor tile at grid cell and add floor/roof visuals
-  // - room: carve a small 3x3 room centered on the chosen cell (if it fits)
-  // - notebook: spawn a notebook at the cell
-  // - item: spawn a blue soda item at the cell
-  // - elevator: place an exit marker (exit sign) on the cell
-  try {
-    // bounds check
-    if (gx < 0 || gx >= GW || gy < 0 || gy >= GH) return;
-
-    if (type === 'hall') {
-      if (!grid[gy]) grid[gy] = new Array(GW).fill(0);
-      grid[gy][gx] = 1;
-
-      // add floor tile
-      const floor = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE), floorMat);
-      floor.rotation.x = -Math.PI / 2;
-      floor.position.set(wx, 0, wz);
-      floor.receiveShadow = true;
-      floor.userData.baseRotation = floor.rotation.clone();
-      floorGroup.add(floor);
-
-      const roof = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE), roofMat);
-      roof.rotation.x = Math.PI / 2;
-      roof.position.set(wx, wallHeight - 0.02, wz);
-      roof.userData.baseRotation = roof.rotation.clone();
-      roofGroup.add(roof);
-
-    } else if (type === 'room') {
-      // carve a 3x3 room centered at gx,gy if it fits inside map
-      const rw = 3, rh = 3;
-      const startX = gx - Math.floor(rw / 2);
-      const startY = gy - Math.floor(rh / 2);
-      if (startX >= 1 && startY >= 1 && startX + rw < GW && startY + rh < GH) {
-        for (let yy = startY; yy < startY + rh; yy++) {
-          for (let xx = startX; xx < startX + rw; xx++) {
-            if (!grid[yy]) grid[yy] = new Array(GW).fill(0);
-            grid[yy][xx] = 1;
-            const fx = (xx - GW / 2 + 0.5) * TILE;
-            const fz = (yy - GH / 2 + 0.5) * TILE;
-            const floor = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE), floorMat);
-            floor.rotation.x = -Math.PI / 2;
-            floor.position.set(fx, 0, fz);
-            floor.userData.baseRotation = floor.rotation.clone();
-            floorGroup.add(floor);
-            const roof = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE), roofMat);
-            roof.rotation.x = Math.PI / 2;
-            roof.position.set(fx, wallHeight - 0.02, fz);
-            roof.userData.baseRotation = roof.rotation.clone();
-            roofGroup.add(roof);
-          }
-        }
-        // register a room entry (minimal): id based on current rooms length
-        const roomId = rooms.length;
-        const roomObj = { x: startX, y: startY, w: rw, h: rh, id: roomId };
-        rooms.push(roomObj);
-      }
-    } else if (type === 'notebook') {
-      // spawn a notebook plane at this location
-      const geom = new THREE.PlaneGeometry(1.2, 1.2);
-      const nb = new THREE.Mesh(geom, notebookMat);
-      nb.position.set(wx, wallHeight / 2, wz);
-      nb.rotation.y = 0;
-      notebookGroup.add(nb);
-      notebookStates.push({ mesh: nb, collected: false, baseY: wallHeight / 2, roomIndex: null });
-    } else if (type === 'item') {
-      // spawn a blue soda item at this location
-      const sizeItem = 0.8;
-      const geom = new THREE.PlaneGeometry(sizeItem, sizeItem);
-      const meshItem = new THREE.Mesh(geom, blueSodaMat);
-      meshItem.position.set(wx, wallHeight / 2, wz);
-      meshItem.userData.type = 'blue_soda';
-      itemGroup.add(meshItem);
-      itemStates.push({ mesh: meshItem, type: 'blue_soda', roomIndex: null, baseY: wallHeight / 2 });
-    } else if (type === 'elevator') {
-      // place an exit plane at this tile (same as spawnExits creation)
-      const geom = new THREE.PlaneGeometry(TILE, wallHeight);
-      const mesh = new THREE.Mesh(geom, exitMat);
-      mesh.position.set(wx, wallHeight / 2, wz);
-      exitGroup.add(mesh);
-      exitStates.push({ mesh, collected: false });
-    }
-  } catch (e) { console.warn('Editor placement error:', e); }
-}
-
-// helper: raycast center of screen to floor to get grid cell
-function getEditorGridFromCenter() {
-  const rc = new THREE.Raycaster();
-  rc.setFromCamera(new THREE.Vector2(0, 0), camera);
-
-  // Try precise hit against existing floor tiles first
-  const hits = rc.intersectObjects(floorGroup.children, true);
-  if (hits && hits.length) {
-    const hit = hits[0];
-    const x = hit.point.x;
-    const z = hit.point.z;
-    const gx = Math.floor(x / TILE + GW / 2);
-    const gy = Math.floor(z / TILE + GH / 2);
-    if (gx < 0 || gx >= GW || gy < 0 || gy >= GH) return null;
-    return { gx, gy };
-  }
-
-  // Fallback: intersect with an infinite ground plane at y=0 so editor placements work
-  const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y=0
-  const origin = rc.ray.origin;
-  const dir = rc.ray.direction;
-  const targetPoint = new THREE.Vector3();
-  const intersect = groundPlane.intersectLine(new THREE.Line3(origin, origin.clone().add(dir.clone().multiplyScalar(1000))), targetPoint);
-
-  // If intersectLine returned undefined, try Raycaster .ray.intersectPlane
-  if (!intersect) {
-    const tmp = new THREE.Vector3();
-    if (!rc.ray.intersectPlane(groundPlane, tmp)) return null;
-    targetPoint.copy(tmp);
-  }
-
-  const x = targetPoint.x;
-  const z = targetPoint.z;
-  const gx = Math.floor(x / TILE + GW / 2);
-  const gy = Math.floor(z / TILE + GH / 2);
-  if (gx < 0 || gx >= GW || gy < 0 || gy >= GH) return null;
-  return { gx, gy };
-}
-
-// click handler for editor placement (left mouse button)
-canvas.addEventListener('mousedown', (e) => {
-  if (!inLevelEditor) return;
-  if (e.button !== 0) return;
-  e.preventDefault();
-  const gridPos = getEditorGridFromCenter();
-  if (!gridPos) return;
-  placeEditorMarkerAtGrid(gridPos.gx, gridPos.gy, editorTool);
-});
-
-// bind level editor main menu button
-if (levelEditorButtonEl) {
-  levelEditorButtonEl.addEventListener('click', (e) => {
-    e.stopPropagation();
-    enterLevelEditor();
-  });
-}
-
-// allow exiting editor with ESC
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' || e.key === 'Esc') {
-    if (inLevelEditor) {
-      exitLevelEditor();
-      e.preventDefault();
-    }
-  }
-});
-
 // buzzer on catch (replaced with scream)
 const catchBuzzerSound = new Audio('./GAHHH.wav');
 catchBuzzerSound.preload = 'auto';
@@ -2239,37 +1754,8 @@ const chaseMusic = new Audio('./ItReallyGetsBalder.wav');
 chaseMusic.loop = true;
 chaseMusic.preload = 'auto';
 
-// NEW: wind howling ambience for dark mode
-const windHowlSound = new Audio('./wind_howling_02-78263.mp3');
-windHowlSound.loop = true;
-windHowlSound.preload = 'auto';
-windHowlSound.volume = 0.85;
-
 // start hum and lock pointer on first game click (not on main menu)
 let humStarted = false;
-
-/**
- * Pointer lock cooldown guard and safe lock helper.
- * Some browsers produce an error if lock() is requested immediately after exiting;
- * we use a short cooldown and retry loop to avoid unhandled rejections.
- */
-let pointerLockCooldown = false;
-
-document.addEventListener('pointerlockerror', () => {
-  // if an error occurs, prevent immediate re-lock attempts for a short window
-  pointerLockCooldown = true;
-  setTimeout(() => { pointerLockCooldown = false; }, 300);
-});
-
-document.addEventListener('pointerlockchange', () => {
-  // if pointer is locked to our canvas, clear cooldown; otherwise set a tiny cooldown
-  if (document.pointerLockElement === canvas) {
-    pointerLockCooldown = false;
-  } else {
-    pointerLockCooldown = true;
-    setTimeout(() => { pointerLockCooldown = false; }, 180);
-  }
-});
 
 const LOCK_COOLDOWN_MS = 1300; // Chrome blocks re-lock ~1s after Esc
 let lastUnlockTime = 0;
@@ -2321,26 +1807,9 @@ canvas.addEventListener('click', () => {
 
   if (!humStarted) {
     humStarted = true;
-    try {
-      humSound.currentTime = 0;
-      humSound.play();
-    } catch { }
+    try { audios.play('sfx', 'humming', .18, true); } catch { }
   }
 });
-
-// load notebook pickup sound
-const notebookPickupSound = new Audio('./paper-rustle-81855.mp3');
-notebookPickupSound.preload = 'auto';
-
-// walkie-talkie beep sound
-const walkieTalkieBeepSound = new Audio('./beep-329314.mp3');
-walkieTalkieBeepSound.preload = 'auto';
-walkieTalkieBeepSound.volume = 0.9;
-
-// purple chocolate crunch sound
-const purpleChocolateSound = new Audio('./plastic-crunch-83779.mp3');
-purpleChocolateSound.preload = 'auto';
-purpleChocolateSound.volume = 0.9;
 
 // sound that plays after the jumpscare during blackout
 const postJumpscareSound = new Audio('./bbbbb.wav');
@@ -2357,13 +1826,6 @@ Object.assign(blackoutOverlay.style, {
   display: 'none'
 });
 document.body.appendChild(blackoutOverlay);
-
-// load door sounds
-const doorOpenSound = new Audio('./door-opening-397990.mp3');
-doorOpenSound.preload = 'auto';
-
-const doorCloseSound = new Audio('./close-door-382723.mp3');
-doorCloseSound.preload = 'auto';
 
 // helper to play a door sound with volume based on distance to player
 function playDoorSoundForDoor(audio, doorGroup) {
@@ -2403,28 +1865,20 @@ sweepSound.loop = true;
 sweepSound.volume = 1.0;
 
 // colors / materials
-const textureLoader = new THREE.TextureLoader();
+const loader = new THREE.TextureLoader();
 
 // enemy billboard texture
-const enemyTex = textureLoader.load('./itgetsbalder.png');
-enemyTex.magFilter = THREE.NearestFilter;
-enemyTex.minFilter = THREE.NearestFilter;
-enemyTex.generateMipmaps = false;
+const enemyTex = pointTex(loader.load(CACHED_IMG.characters.teacher.src));
 
 // door textures
 const doorTex = CACHED_IMG.textures.door;
 const doorOpenedTex = CACHED_IMG.textures.door_open;
 
-const oldBootsTex = textureLoader.load('./boots.png');
-oldBootsTex.magFilter = THREE.NearestFilter;
-oldBootsTex.minFilter = THREE.NearestFilter;
-oldBootsTex.generateMipmaps = false;
-
 // NEW: Sweep texture
-const sweepTex = CACHED_IMG.characters.broom;
+const sweepTex = pointTex(loader.load(CACHED_IMG.characters.broom.src));
 
 // NEW: array of poster materials used for random hallway wall posters
-const posterMats = [...Array.from({length: 8}, (_, i) => (
+const posterMats = [...Array.from({ length: 8 }, (_, i) => (
   new THREE.MeshStandardMaterial({
     map: CACHED_IMG.posters["poster" + (i + 1)],
     transparent: true,
@@ -2433,101 +1887,45 @@ const posterMats = [...Array.from({length: 8}, (_, i) => (
 ))];
 
 // NEW: item and splash textures
-const blueSodaTex = textureLoader.load('./dither_it_2025_12_10_0is_Kleki.png');
-blueSodaTex.magFilter = THREE.NearestFilter;
-blueSodaTex.minFilter = THREE.NearestFilter;
-blueSodaTex.generateMipmaps = false;
+const bSodaSrc = CACHED_IMG.items.soda.src;
+const blueSodaTex = pointTex(loader.load(bSodaSrc));
 
-const chocoTex = CACHED_IMG.items.chocolate;
-const purpleChocolateTex = pointTex(textureLoader.load(chocoTex), false);
+const purpleChocoSrc = CACHED_IMG.items.chocolate.src;
+const purpleChocolateTex = pointTex(loader.load(purpleChocoSrc));
 
-// Preload DOM icon for purple chocolate
-const purpleChocolateIconSrc = chocoTex.src;
-const purpleChocolateIcon = new Image();
-purpleChocolateIcon.src = purpleChocolateIconSrc;
+const trackerSrc = CACHED_IMG.items.tracker.src;
+const trackerTex = pointTex(loader.load(trackerSrc));
 
-// NEW: minimap icon images for notebooks, player, and balder
+const wdSrc = CACHED_IMG.items.wd40.src;
+const wd40Tex = pointTex(loader.load(wdSrc));
+
+const bootsSrc = CACHED_IMG.items.boots.src;
+const oldBootsTex = pointTex(loader.load(bootsSrc));
+
+const ITEM_ICONS = {
+  blue_soda: bSodaSrc,
+  purple_chocolate: purpleChocoSrc,
+  walkie_talkie: trackerSrc,
+  wd40: wdSrc,
+  old_boots: bootsSrc
+};
+
+const sparkleTex = pointTex(loader.load(CACHED_IMG.effects.sparkle.src));
+const splashTex = pointTex(loader.load(CACHED_IMG.effects.spray.src));
+
+// NEW: minimap icon images for notebooks
 const nbTex = CACHED_IMG.items.notebook;
-const noteBookTex = pointTex(textureLoader.load(nbTex), false);
-
-const notebookIconSrc = nbTex.src;
-const notebookIcon = new Image();
-notebookIcon.src = notebookIconSrc;
-
-const playerIconSrc = './thumn.png';
-const playerIcon = new Image();
-playerIcon.src = playerIconSrc;
-
-const balderIconSrc = './itgetsbalder.png';
-const balderIcon = new Image();
-balderIcon.src = balderIconSrc;
-
-const walkieTalkieTex = textureLoader.load('./dither_it_2025_12_10_0lk_Kleki.png');
-walkieTalkieTex.magFilter = THREE.NearestFilter;
-walkieTalkieTex.minFilter = THREE.NearestFilter;
-walkieTalkieTex.generateMipmaps = false;
-
-const walkieTalkieIconSrc = './dither_it_2025_12_10_0lk_Kleki.png';
-const walkieTalkieIcon = new Image();
-walkieTalkieIcon.src = walkieTalkieIconSrc;
-
-const wd40Tex = textureLoader.load('./fineButImGonnaUseApaintnetplugin.png');
-wd40Tex.magFilter = THREE.NearestFilter;
-wd40Tex.minFilter = THREE.NearestFilter;
-wd40Tex.generateMipmaps = false;
-
-const oldBootsIconSrc = './boots.png';
-const oldBootsIcon = new Image();
-oldBootsIcon.src = oldBootsIconSrc;
-
-const sparkleTex = textureLoader.load('./Sparkle.webp');
-sparkleTex.magFilter = THREE.NearestFilter;
-sparkleTex.minFilter = THREE.NearestFilter;
-sparkleTex.generateMipmaps = false;
-
-const wd40IconSrc = './fineButImGonnaUseApaintnetplugin.png';
-const wd40Icon = new Image();
-wd40Icon.src = wd40IconSrc;
-
-const splashTex = textureLoader.load('./2025_12_10_0iv_Kleki (1).png');
-splashTex.magFilter = THREE.NearestFilter;
-splashTex.minFilter = THREE.NearestFilter;
-splashTex.generateMipmaps = false;
+const noteBookTex = pointTex(loader.load(nbTex.src));
 
 // NEW: exit textures
 const exitTex = CACHED_IMG.textures.exit;
 const exitUsedTex = CACHED_IMG.textures.exit2;
 
-// Preload DOM icon images for items so inventory icons appear instantly
-const blueSodaIconSrc = './dither_it_2025_12_10_0is_Kleki.png';
-const blueSodaIcon = new Image();
-blueSodaIcon.src = blueSodaIconSrc;
-
-const floorMat = new THREE.MeshStandardMaterial({
-  map: CACHED_IMG.textures.carpet,
-  color: 0xffffff
-}); // textured floor
-const roofMat = new THREE.MeshStandardMaterial({
-  map: CACHED_IMG.textures.roof,
-  side: THREE.DoubleSide
-});
-const wallMat = new THREE.MeshStandardMaterial({
-  map: CACHED_IMG.textures.wall,
-  color: 0xffffff,
-  side: THREE.DoubleSide
-}); // textured walls, double-sided
-const doorClosedMat = new THREE.MeshStandardMaterial({
-  map: doorTex,
-  transparent: true,
-  side: THREE.FrontSide,
-  color: 0xffffff
-});
-const doorOpenedMat = new THREE.MeshStandardMaterial({
-  map: doorOpenedTex,
-  transparent: true,
-  side: THREE.FrontSide,
-  color: 0xffffff
-});
+const floorMat = new THREE.MeshStandardMaterial({ map: CACHED_IMG.textures.carpet, color: 0xffffff }); // textured floor
+const roofMat = new THREE.MeshStandardMaterial({ map: CACHED_IMG.textures.roof, side: THREE.DoubleSide });
+const wallMat = new THREE.MeshStandardMaterial({ map: CACHED_IMG.textures.wall, color: 0xffffff, side: THREE.DoubleSide }); // textured walls, double-sided
+const doorClosedMat = new THREE.MeshStandardMaterial({ map: doorTex, transparent: true, color: 0xffffff });
+const doorOpenedMat = new THREE.MeshStandardMaterial({ map: doorOpenedTex, transparent: true, color: 0xffffff });
 
 // ensure wall and door colors are white so their textures appear the same brightness
 wallMat.color.set(0xffffff);
@@ -2543,16 +1941,8 @@ const doorOpenedTexBack = doorOpenedTex.clone();
 doorOpenedTexBack.repeat.x = -1;
 doorOpenedTexBack.offset.x = 1;
 
-const doorClosedBackMat = new THREE.MeshStandardMaterial({
-  map: doorTexBack,
-  transparent: true,
-  side: THREE.FrontSide
-});
-const doorOpenedBackMat = new THREE.MeshStandardMaterial({
-  map: doorOpenedTexBack,
-  transparent: true,
-  side: THREE.FrontSide
-});
+const doorClosedBackMat = new THREE.MeshStandardMaterial({ map: doorTexBack, transparent: true });
+const doorOpenedBackMat = new THREE.MeshStandardMaterial({ map: doorOpenedTexBack, transparent: true });
 
 // tint doors to match wall color
 doorClosedMat.color.copy(wallMat.color);
@@ -2563,13 +1953,15 @@ doorOpenedBackMat.color.copy(wallMat.color);
 const notebookMat = new THREE.MeshStandardMaterial({
   map: noteBookTex,
   transparent: true,
-  side: THREE.DoubleSide
+  side: THREE.DoubleSide,
+  depthWrite: false
 });
 
 const enemyMat = new THREE.MeshStandardMaterial({
   map: enemyTex,
   transparent: true,
-  side: THREE.DoubleSide
+  side: THREE.DoubleSide,
+  depthWrite: false
 });
 
 // NEW: item and splash materials
@@ -2586,7 +1978,7 @@ const purpleChocolateMat = new THREE.MeshStandardMaterial({
 });
 
 const walkieTalkieMat = new THREE.MeshStandardMaterial({
-  map: walkieTalkieTex,
+  map: trackerTex,
   transparent: true,
   side: THREE.DoubleSide
 });
@@ -2604,43 +1996,23 @@ const oldBootsMat = new THREE.MeshStandardMaterial({
 });
 
 // NEW: point pickup textures & materials (non-inventory pickups that award points)
-const orangePointTex = textureLoader.load('./orange point.png');
-orangePointTex.magFilter = THREE.NearestFilter;
-orangePointTex.minFilter = THREE.NearestFilter;
-orangePointTex.generateMipmaps = false;
-
-const greenPointTex = textureLoader.load('./green point.png');
-greenPointTex.magFilter = THREE.NearestFilter;
-greenPointTex.minFilter = THREE.NearestFilter;
-greenPointTex.generateMipmaps = false;
-
-const pinkPointTex = textureLoader.load('./pink point.png');
-pinkPointTex.magFilter = THREE.NearestFilter;
-pinkPointTex.minFilter = THREE.NearestFilter;
-pinkPointTex.generateMipmaps = false;
-
-const megaPointTex = textureLoader.load('./mega point.png');
-megaPointTex.magFilter = THREE.NearestFilter;
-megaPointTex.minFilter = THREE.NearestFilter;
-megaPointTex.generateMipmaps = false;
-
 const orangePointMat = new THREE.MeshStandardMaterial({
-  map: orangePointTex,
+  map: pointTex(loader.load(CACHED_IMG.points.orange.src)),
   transparent: true,
   side: THREE.DoubleSide
 });
 const greenPointMat = new THREE.MeshStandardMaterial({
-  map: greenPointTex,
+  map: pointTex(loader.load(CACHED_IMG.points.green.src)),
   transparent: true,
   side: THREE.DoubleSide
 });
 const pinkPointMat = new THREE.MeshStandardMaterial({
-  map: pinkPointTex,
+  map: pointTex(loader.load(CACHED_IMG.points.pink.src)),
   transparent: true,
   side: THREE.DoubleSide
 });
 const megaPointMat = new THREE.MeshStandardMaterial({
-  map: megaPointTex,
+  map: pointTex(loader.load(CACHED_IMG.points.mega.src)),
   transparent: true,
   side: THREE.DoubleSide
 });
@@ -2718,81 +2090,80 @@ showEnemyOnMinimapUntil = 0;
 const exitGroup = new THREE.Group();
 scene.add(exitGroup);
 const exitStates = []; // { mesh, collected }
+// Direction table: grid offset of the neighbouring tile, plus the exit plane
+// rotation so it faces into the hallway (matches the old N/S/W/E values).
+const EXIT_DIRS = {
+  N: { dx: 0, dy: -1, ry: 0 },
+  S: { dx: 0, dy: 1, ry: Math.PI },
+  W: { dx: -1, dy: 0, ry: Math.PI / 2 },
+  E: { dx: 1, dy: 0, ry: -Math.PI / 2 },
+};
 
 function spawnExits() {
-  // Find all hallway wall spots
-  const candidates = [];
+  const isFloor = (x, y) => x >= 0 && y >= 0 && x < GW && y < GH && grid[y][x];
 
+  // ---- 1. Collect every hallway wall face ----
+  const candidates = [];
   for (let y = 0; y < GH; y++) {
     for (let x = 0; x < GW; x++) {
-      // Must be a floor tile
-      if (!grid[y][x]) continue;
-      // Must NOT be a room tile (strictly hallway)
-      if (roomAtGrid(x, y)) continue;
-
-      // Check 4 neighbors for empty space (walls)
-      if (y - 1 < 0 || !grid[y - 1][x]) candidates.push({ x, y, dir: 'N' }); // North
-      if (y + 1 >= GH || !grid[y + 1][x]) candidates.push({ x, y, dir: 'S' }); // South
-      if (x - 1 < 0 || !grid[y][x - 1]) candidates.push({ x, y, dir: 'W' }); // West
-      if (x + 1 >= GW || !grid[y][x + 1]) candidates.push({ x, y, dir: 'E' }); // East
+      if (!grid[y][x] || roomAtGrid(x, y)) continue; // strictly hallway floor
+      for (const dir in EXIT_DIRS) {
+        const { dx, dy } = EXIT_DIRS[dir];
+        if (!isFloor(x + dx, y + dy)) candidates.push({ x, y, dir });
+      }
     }
   }
 
-  // Shuffle candidates
+  // ---- 2. Seeded shuffle (same rng call pattern as before) ----
   for (let i = candidates.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
     [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
   }
 
-  // Pick 4
-  // choose up to configured exits (genMaxExits global), clamp safely
-  const num = Math.max(1, Math.min(12, Math.floor(genMaxExits) || 4));
-  const chosen = candidates.slice(0, num);
-
-  chosen.forEach(c => {
-    // Calculate wall position
-    const cx = (c.x - GW / 2 + 0.5) * TILE;
-    const cz = (c.y - GH / 2 + 0.5) * TILE;
-
-    let wx = cx, wz = cz;
-    let ry = 0;
-
-    if (c.dir === 'N') {
-      wz -= TILE / 2;
-      ry = 0;
-    } else if (c.dir === 'S') {
-      wz += TILE / 2;
-      ry = Math.PI;
-    } else if (c.dir === 'W') {
-      wx -= TILE / 2;
-      ry = Math.PI / 2;
-    } else if (c.dir === 'E') {
-      wx += TILE / 2;
-      ry = -Math.PI / 2;
+  // ---- 3. Pick exits, spread apart ----
+  // Greedy: first demand a big gap between exits, then relax the gap
+  // (in tiles) until enough are chosen. Never the same wall face twice.
+  const num = genMaxExits;
+  const chosen = [];
+  for (const minGap of [6, 4, 3, 2, 1, 0]) {
+    for (const c of candidates) {
+      if (chosen.length >= num) break;
+      if (chosen.includes(c)) continue;
+      const farEnough = chosen.every(o =>
+        o.x === c.x && o.y === c.y
+          ? minGap === 0 && o.dir !== c.dir          // same tile only as a last resort
+          : Math.hypot(o.x - c.x, o.y - c.y) >= minGap
+      );
+      if (farEnough) chosen.push(c);
     }
+    if (chosen.length >= num) break;
+  }
 
-    // Try to find existing wall to replace
-    const epsilon = 0.1;
+  // ---- 4. Build the exit planes ----
+  const geom = new THREE.PlaneGeometry(TILE, wallHeight); // shared by all exits
+  const epsilon = 0.1;
+
+  for (const c of chosen) {
+    const { dx, dy, ry } = EXIT_DIRS[c.dir];
+
+    // tile centre, pushed half a tile toward the wall
+    const wx = (c.x - GW / 2 + 0.5) * TILE + dx * TILE / 2;
+    const wz = (c.y - GH / 2 + 0.5) * TILE + dy * TILE / 2;
+
+    // replace the visual wall (its collider stays, exit is solid anyway)
     const wallToRemove = wallGroup.children.find(w =>
       Math.abs(w.position.x - wx) < epsilon &&
       Math.abs(w.position.z - wz) < epsilon
     );
+    if (wallToRemove) wallGroup.remove(wallToRemove);
 
-    if (wallToRemove) {
-      wallGroup.remove(wallToRemove);
-      // We keep the collider box since the exit acts as a solid wall at the same location
-    }
-
-    // Create wall-sized exit
-    const geom = new THREE.PlaneGeometry(TILE, wallHeight);
     const mesh = new THREE.Mesh(geom, exitMat);
-
     mesh.position.set(wx, wallHeight / 2, wz);
     mesh.rotation.y = ry;
 
     exitGroup.add(mesh);
     exitStates.push({ mesh, collected: false });
-  });
+  }
 }
 
 // NEW: AI state machine for chaser
@@ -2834,6 +2205,7 @@ const npcStates = []; // { type, mesh, roomIndex, basePos, cooldown }
 
 // helper: send player to detention (principal behavior)
 let detentionActive = false;
+let detentionTimeout;
 function sendPlayerToDetention(durationSec = 15) {
   if (detentionActive) return;
   // find principal room center
@@ -2886,7 +2258,7 @@ function bobAttemptSteal(state) {
   // small cooldown before next steal
   state.cooldown = clock.getElapsed() + 8.0;
   // play a light sound (reusing pickup) as feedback
-  try { notebookPickupSound.currentTime = 0; notebookPickupSound.play(); } catch (e) { }
+  try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
 }
 
 // helper: playgirl forces a brief interaction like Playtime
@@ -2954,8 +2326,7 @@ useHeldItem = function () {
         // Respect per-principal cooldown to avoid repeated immediate detentions
         if (st.cooldown && st.cooldown > now) continue;
 
-        const d = st.mesh.position.distanceTo(controls.object.position);
-        if (d < TILE * 3) {
+        if (st.mesh.position.distanceTo(controls.object.position) < TILE * 3) {
           sendPlayerToDetention(15);
           st.cooldown = now + 20.0;
         }
@@ -2982,8 +2353,6 @@ let isJumpScare = false;
 let hasResetOnCatch = false;
 let jumpShakeStartTime = 0;
 
-
-
 // Notebooks in room centers
 const notebookGroup = new THREE.Group();
 scene.add(notebookGroup);
@@ -3000,61 +2369,34 @@ const inventory = [null, null, null, null, null];
 let selectedInvIndex = 0;
 
 // helper: update inventory HUD visuals
-function refreshInventoryHUD() {
-  for (let i = 0; i < invSlotEls.length; i++) {
-    const slotEl = invSlotEls[i];
-    const iconEl = invIconEls[i];
-    const item = inventory[i];
-    if (item) {
-      if (item.type === 'blue_soda') {
-        if (iconEl.src !== blueSodaIconSrc && !iconEl.src.endsWith(blueSodaIconSrc)) {
-          iconEl.src = blueSodaIconSrc;
-        }
-        iconEl.style.display = 'block';
-      } else if (item.type === 'purple_chocolate') {
-        if (iconEl.src !== purpleChocolateIconSrc && !iconEl.src.endsWith(purpleChocolateIconSrc)) {
-          iconEl.src = purpleChocolateIconSrc;
-        }
-        iconEl.style.display = 'block';
-      } else if (item.type === 'walkie_talkie') {
-        if (iconEl.src !== walkieTalkieIconSrc && !iconEl.src.endsWith(walkieTalkieIconSrc)) {
-          iconEl.src = walkieTalkieIconSrc;
-        }
-        iconEl.style.display = 'block';
-      } else if (item.type === 'wd40') {
-        if (iconEl.src !== wd40IconSrc && !iconEl.src.endsWith(wd40IconSrc)) {
-          iconEl.src = wd40IconSrc;
-        }
-        iconEl.style.display = 'block';
-      } else if (item.type === 'old_boots') {
-        if (iconEl.src !== oldBootsIconSrc && !iconEl.src.endsWith(oldBootsIconSrc)) {
-          iconEl.src = oldBootsIconSrc;
-        }
-        iconEl.style.display = 'block';
-      } else {
-        iconEl.src = '';
-        iconEl.style.display = 'none';
-      }
-    } else {
-      iconEl.src = '';
+
+function setSlotIcon(iconEl, src) {
+  if (!src) {
+    if (iconEl.style.display !== 'none') {
+      iconEl.removeAttribute('src');   // avoids a broken-image request from src=""
       iconEl.style.display = 'none';
     }
-    if (i === selectedInvIndex) {
-      slotEl.classList.add('selected');
-    } else {
-      slotEl.classList.remove('selected');
-    }
+    return;
+  }
+  // Compare against the attribute we set, not iconEl.src (which the browser
+  // resolves to an absolute URL, so the original comparison needed endsWith)
+  if (iconEl.dataset.src !== src) {
+    iconEl.src = src;
+    iconEl.dataset.src = src;
+  }
+  iconEl.style.display = 'block';
+}
+
+function refreshInventoryHUD() {
+  for (let i = 0; i < invSlotEls.length; i++) {
+    const item = inventory[i];
+    setSlotIcon(invIconEls[i], item ? ITEM_ICONS[item.type] : null);
+    invSlotEls[i].classList.toggle('selected', i === selectedInvIndex);
   }
 
-  // update use button visibility
   if (useItemButtonEl) {
-    const isMobile = navigator.maxTouchPoints > 0;
-    const hasItem = inventory[selectedInvIndex] !== null;
-    if (isMobile && hasItem) {
-      useItemButtonEl.style.display = 'flex';
-    } else {
-      useItemButtonEl.style.display = 'none';
-    }
+    const hasItem = !!inventory[selectedInvIndex];
+    useItemButtonEl.style.display = isMobile && hasItem ? 'flex' : 'none';
   }
 }
 
@@ -3204,181 +2546,22 @@ function enemyOpenNearbyDoors() {
     d.group.getWorldPosition(doorPos);
     const dx = doorPos.x - enemyPos.x;
     const dz = doorPos.z - enemyPos.z;
-    const distSq = dx * dx + dz * dz;
-    if (distSq <= openRadiusSq) {
-      openDoorState(d, true);
-    }
+    if ((dx * dx + dz * dz) <= openRadiusSq) openDoorState(d, true);
   }
 }
 
-// create minimap canvas and helper
-const minimap = document.getElementById('minimap');
-const mmCtx = minimap.getContext('2d');
-const mmW = minimap.width;
-const mmH = minimap.height;
-function drawMinimap() {
-  // defensive: ensure we have a valid canvas context
-  if (!mmCtx || !minimap) return;
-
-  // clear
-  try { mmCtx.clearRect(0, 0, mmW, mmH); } catch (e) { return; }
-
-  // scale to grid
-  const px = Math.floor(mmW / GW);
-  const py = Math.floor(mmH / GH);
-  const s = Math.max(1, Math.min(px, py));
-
-  // background
-  mmCtx.fillStyle = '#070707';
-  mmCtx.fillRect(0, 0, mmW, mmH);
-
-  // draw floor/corridor tiles
-  for (let y = 0; y < GH; y++) {
-    for (let x = 0; x < GW; x++) {
-      if (grid && grid[y] && grid[y][x]) {
-        mmCtx.fillStyle = '#2b2b2b'; // floor
-        mmCtx.fillRect(x * s, y * s, s, s);
-      }
-    }
-  }
-
-  // Draw exits (guard for exitStates entries)
-  if (Array.isArray(exitStates)) {
-    for (const es of exitStates) {
-      if (!es || !es.mesh || !es.mesh.position) continue;
-      const gx = Math.floor((es.mesh.position.x / TILE) + GW / 2);
-      const gy = Math.floor((es.mesh.position.z / TILE) + GH / 2);
-      // Green if active (uncollected), Red if used (collected)
-      mmCtx.fillStyle = es.collected ? '#ff0000' : '#00ff00';
-      mmCtx.fillRect(gx * s, gy * s, s, s);
-    }
-  }
-
-  // get player grid coordinates once
-  const p = controls && controls.getObject ? controls.object.position : { x: 0, z: 0 };
-  const gx = Math.floor((p.x / TILE) + GW / 2);
-  const gy = Math.floor((p.z / TILE) + GH / 2);
-
-  // determine which room (if any) the player is currently in
-  let currentRoom = null;
-  if (Array.isArray(rooms)) {
-    for (const r of rooms) {
-      if (!r) continue;
-      if (gx >= r.x && gx < r.x + r.w && gy >= r.y && gy < r.y + r.h) {
-        currentRoom = r;
-        break;
-      }
-    }
-  }
-
-  // draw rooms, highlighting the current room in green
-  if (Array.isArray(rooms)) {
-    for (const r of rooms) {
-      if (!r) continue;
-      if (currentRoom && r === currentRoom) {
-        mmCtx.fillStyle = '#00aa00';
-      } else {
-        mmCtx.fillStyle = '#b0b0b0';
-      }
-      mmCtx.fillRect(r.x * s, r.y * s, r.w * s, r.h * s);
-    }
-  }
-
-  // draw player icon
-  const playerCx = gx * s + s / 2;
-  const playerCy = gy * s + s / 2;
-  const playerSize = Math.max(6, Math.floor(s * 1.6));
-  if (playerIcon && playerIcon.complete) {
-    try {
-      mmCtx.drawImage(playerIcon, playerCx - playerSize / 2, playerCy - playerSize / 2, playerSize, playerSize);
-    } catch (e) {
-      // ignore drawing errors
-    }
-  } else {
-    // fallback small circle
-    mmCtx.fillStyle = '#00ff80';
-    mmCtx.beginPath();
-    mmCtx.arc(playerCx, playerCy, 5, 0, Math.PI * 2);
-    mmCtx.fill();
-  }
-
-  // show enemy (Balder) if walkie talkie active OR if modBaldiIcon toggled: draw Balder icon blinking
-  const now = clock.getElapsed();
-  const shouldShowBalder = (typeof enemyMesh !== 'undefined' && enemyMesh && (now < showEnemyOnMinimapUntil)) || (typeof enemyMesh !== 'undefined' && enemyMesh && modBaldiIcon);
-  if (enemyMesh && shouldShowBalder) {
-    if (Math.floor(now * 10) % 2 === 0) {
-      if (enemyMesh.position) {
-        const ex = Math.floor((enemyMesh.position.x / TILE) + GW / 2);
-        const ey = Math.floor((enemyMesh.position.z / TILE) + GH / 2);
-        const enemyCx = ex * s + s / 2;
-        const enemyCy = ey * s + s / 2;
-        const iconSize = Math.max(6, Math.floor(s * 1.6));
-        if (balderIcon && balderIcon.complete) {
-          try {
-            mmCtx.drawImage(balderIcon, enemyCx - iconSize / 2, enemyCy - iconSize / 2, iconSize, iconSize);
-          } catch (e) { }
-        } else {
-          mmCtx.fillStyle = '#ff0000';
-          mmCtx.beginPath();
-          mmCtx.arc(enemyCx, enemyCy, 5, 0, Math.PI * 2);
-          mmCtx.fill();
-        }
-      }
-    }
-  }
-
-  // NEW: show all uncollected notebooks as blinking icons
-  if (Array.isArray(notebookStates) && notebookStates.length) {
-    for (let i = 0; i < notebookStates.length; i++) {
-      const nb = notebookStates[i];
-      if (!nb || nb.collected) continue;
-      if (!nb.mesh || !nb.mesh.position) continue;
-      const nbPos = nb.mesh.position;
-      const nx = Math.floor((nbPos.x / TILE) + GW / 2);
-      const ny = Math.floor((nbPos.z / TILE) + GH / 2);
-      const cx = nx * s + s / 2;
-      const cy = ny * s + s / 2;
-      const iconSize = Math.max(6, Math.floor(s * 1.2));
-      const blink = (Math.floor(now * 4 + (i % 3)) % 2) === 0;
-      if (notebookIcon && notebookIcon.complete) {
-        // slightly tint/alpha when blinking to emulate the old blink
-        mmCtx.globalAlpha = blink ? 1.0 : 0.7;
-        try {
-          mmCtx.drawImage(notebookIcon, cx - iconSize / 2, cy - iconSize / 2, iconSize, iconSize);
-        } catch (e) { }
-        mmCtx.globalAlpha = 1.0;
-      } else {
-        mmCtx.fillStyle = blink ? '#ffff66' : '#ffd400';
-        const size = Math.max(2, Math.min(6, Math.floor(s * 0.6)));
-        mmCtx.beginPath();
-        mmCtx.arc(cx, cy, size, 0, Math.PI * 2);
-        mmCtx.fill();
-        mmCtx.strokeStyle = 'rgba(0,0,0,0.6)';
-        mmCtx.lineWidth = 1;
-        mmCtx.stroke();
-      }
-    }
-  }
-
-  // NEW: show nearest notebook when peaceful walkie used (retain cyan blink)
-  if (now < showNotebookOnMinimapUntil && showNotebookIndex >= 0 && Array.isArray(notebookStates) && notebookStates[showNotebookIndex] && !notebookStates[showNotebookIndex].collected) {
-    const nbEntry = notebookStates[showNotebookIndex];
-    if (nbEntry && nbEntry.mesh && nbEntry.mesh.position) {
-      const nbPos = nbEntry.mesh.position;
-      const nx = Math.floor((nbPos.x / TILE) + GW / 2);
-      const ny = Math.floor((nbPos.z / TILE) + GH / 2);
-      const noteCx = nx * s + s / 2;
-      const noteCy = ny * s + s / 2;
-      mmCtx.save();
-      mmCtx.globalAlpha = 0.95;
-      mmCtx.fillStyle = '#00ffff';
-      mmCtx.beginPath();
-      mmCtx.arc(noteCx, noteCy, 5, 0, Math.PI * 2);
-      mmCtx.fill();
-      mmCtx.restore();
-    }
-  }
-}
+// ---------- Minimap ----------
+const minimap = new Minimap(
+  document.getElementById('minimap'),
+  // Called every frame, so reassigned `let` variables are always current.
+  () => ({
+    GW, GH, TILE, grid, rooms, exitStates, notebookStates,
+    controls, camera, enemyMesh,
+    now: clock.getElapsed(),
+    showEnemyOnMinimapUntil, showNotebookOnMinimapUntil, showNotebookIndex, modBaldiIcon,
+    icons: { notebook: nbTex }
+  }), { size: 220 }
+);
 
 // Resize
 window.addEventListener('resize', () => {
@@ -3399,7 +2582,7 @@ function triggerWin() {
   // If we have more floors to play, advance to next floor instead of final win overlay
   if (currentFloor < maxFloors) {
     // stop sounds and show a brief transition (blackout)
-    stopAllSounds();
+    audios.stopAll();
     blackoutOverlay.style.display = 'block';
     // small delay to make transition feel noticeable
     setTimeout(() => {
@@ -3409,7 +2592,7 @@ function triggerWin() {
       initGame();
       // ensure menus remain hidden and UI shown
       if (mainMenuEl) mainMenuEl.style.display = 'none';
-      if (minimap) minimap.style.display = 'block';
+      if (minimap) minimap.canvas.style.display = 'block';
       if (inventoryEl) inventoryEl.style.display = 'flex';
       // hide blackout and update displays
       blackoutOverlay.style.display = 'none';
@@ -3427,28 +2610,24 @@ function triggerWin() {
   // persist points on win
   try {
     localStorage.setItem('rooms_maze_points', String(points));
-  } catch (e) { }
+  } catch { }
 
   // stop all audio immediately on win
-  stopAllSounds();
+  audios.stopAll();
 
   // Disable controls
   controls.unlock();
   controls.enabled = false;
 
   // Show win overlay
-  if (winOverlay) {
-    winOverlay.style.display = 'flex';
-  }
+  if (winOverlay) winOverlay.style.display = 'flex';
 
   // Hide UI
   if (notebookCounterEl) notebookCounterEl.style.display = 'none';
   if (seedDisplayEl) seedDisplayEl.style.display = 'none';
   if (difficultyDisplayEl) difficultyDisplayEl.style.display = 'none';
   if (inventoryEl) inventoryEl.style.display = 'none';
-  if (minimap) minimap.style.display = 'none';
-  const wm = document.getElementById('watermark');
-  if (wm) wm.style.display = 'none';
+  if (minimap) minimap.canvas.style.display = 'none';
 }
 
 function tryInteractExit() {
@@ -3493,7 +2672,7 @@ function openDoorState(door, openedByEnemy = false) {
   door.openUntil = now + 3.0;
 
   // play open sound with distance-based volume
-  playDoorSoundForDoor(doorOpenSound, door.group);
+  playDoorSoundForDoor(audios.get('door', 'open'), door.group);
 
   // NEW: Check if door is within a silent area (WD40 effect)
   const doorPos = new THREE.Vector3();
@@ -3522,9 +2701,9 @@ function openDoorState(door, openedByEnemy = false) {
       baldicatorEl.style.display = 'none'; // force hide to ensure reset if needed
 
       if (distance <= hearingRange) {
-        baldicatorEl.src = './Baldicator_Look.webp';
+        baldicatorEl.src = './assets/img/baldicator/look.webp';
       } else {
-        baldicatorEl.src = './Baldicator_Think.webp';
+        baldicatorEl.src = './assets/img/baldicator/think.webp';
       }
 
       // Force a reflow to ensure display change registers if it was already block
@@ -3614,12 +2793,7 @@ function tryCollectNotebook() {
   checkNotebookCompletion();
 
   // play pickup sound
-  try {
-    notebookPickupSound.currentTime = 0;
-    notebookPickupSound.play();
-  } catch (e) {
-    // ignore playback errors (e.g., autoplay restrictions)
-  }
+  try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
 
   // If this pickup resulted in collecting all notebooks, start the RUN.. loop and mark time
   if (totalRooms > 0 && notebooksCollected >= totalRooms) {
@@ -3677,10 +2851,7 @@ function tryPickupItem() {
     updateInfoDisplays();
 
     // play pickup sound and remove the world mesh
-    try {
-      notebookPickupSound.currentTime = 0;
-      notebookPickupSound.play();
-    } catch (e) { }
+    try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
 
     itemGroup.remove(item.mesh);
     itemStates.splice(itemStates.indexOf(item), 1);
@@ -3728,7 +2899,7 @@ function tryPickupItem() {
 }
 
 // Listen for clicks to interact (items, notebooks, then doors)
-window.addEventListener('mousedown', (e) => {
+canvas.addEventListener('mousedown', (e) => {
   // block interactions while main menu is open OR loading
   if (isMainMenu || !inputReady) return;
 
@@ -3753,9 +2924,7 @@ window.addEventListener('mousedown', (e) => {
 });
 
 // also prevent default context menu so right-click feels clean
-window.addEventListener('contextmenu', (e) => {
-  e.preventDefault();
-});
+window.addEventListener('contextmenu', (e) => e.preventDefault());
 
 let lastFrameTime = 0;
 // targetDelta is defined earlier and adjusted by applyRenderMode
@@ -3766,133 +2935,118 @@ const enemyPathUpdateInterval = 0.25;
 // --- NEW: spawn items near room sides, away from doors ---
 
 // build quick lookup for doors by room index and direction
+// (filled in elsewhere: Map<roomIndex, { N: [{door}], S: [...], E: [...], W: [...] }>)
 const doorsByRoomDir = new Map();
 
 // helper: given room and side, compute a candidate position a bit inside the room
 function sidePosition(room, side) {
   const margin = 0.6; // how far in from wall (in grid tiles)
-  const innerX0 = room.x + 0.2;
-  const innerX1 = room.x + room.w - 0.2;
-  const innerY0 = room.y + 0.2;
-  const innerY1 = room.y + room.h - 0.2;
+  const x0 = room.x + 0.2, x1 = room.x + room.w - 0.2;
+  const y0 = room.y + 0.2, y1 = room.y + room.h - 0.2;
 
   let gx, gy;
   if (side === 'N') {
-    gx = innerX0 + rng() * (innerX1 - innerX0);
+    gx = x0 + rng() * (x1 - x0);
     gy = room.y + margin;
   } else if (side === 'S') {
-    gx = innerX0 + rng() * (innerX1 - innerX0);
+    gx = x0 + rng() * (x1 - x0);
     gy = room.y + room.h - margin;
   } else if (side === 'W') {
     gx = room.x + margin;
-    gy = innerY0 + rng() * (innerY1 - innerY0);
-  } else { // 'E'
+    gy = y0 + rng() * (y1 - y0);
+  } else {
     gx = room.x + room.w - margin;
-    gy = innerY0 + rng() * (innerY1 - innerY0);
+    gy = y0 + rng() * (y1 - y0);
   }
 
-  const wx = (gx - GW / 2) * TILE;
-  const wz = (gy - GH / 2) * TILE;
-  return { wx, wz, gx, gy };
+  return { wx: (gx - GW / 2) * TILE, wz: (gy - GH / 2) * TILE, gx, gy };
 }
 
-// helper: check if candidate is near any door for this room on that side
+// helper: is the candidate close to any door on that side of the room?
 function isNearDoor(roomIndex, side, gx, gy) {
-  const entry = doorsByRoomDir.get(roomIndex);
-  if (!entry) return false;
-  const doorsForSide = entry[side] || [];
+  const doorsForSide = doorsByRoomDir.get(roomIndex)?.[side];
+  if (!doorsForSide) return false;
   const maxDist = 1.2; // in grid tiles
-  for (const dInfo of doorsForSide) {
-    const d = dInfo.door;
-    // door is on inside edge of room at grid cell d.x,d.y
-    const dx = d.x - gx;
-    const dy = d.y - gy;
+  for (const { door } of doorsForSide) {
+    const dx = door.x + 0.5 - gx;
+    const dy = door.y + 0.5 - gy;
     if (dx * dx + dy * dy <= maxDist * maxDist) return true;
   }
   return false;
+}
+
+// unbiased seeded shuffle (replaces .sort(() => rng() - 0.5))
+function shuffled(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// weighted pick from [{ w, ... }]
+function weightedPick(table) {
+  let total = 0;
+  for (const e of table) total += e.w;
+  let r = rng() * total;
+  for (const e of table) {
+    if ((r -= e.w) < 0) return e;
+  }
+  return table[table.length - 1];
 }
 
 function spawnRoomItems() {
   if (!rooms.length) return;
   const settings = diffSettings[currentDifficulty];
 
-  // helper: pick a random side of a room
-  function randomSideRoom(room) {
-    const sides = ['N', 'S', 'E', 'W'].sort(() => rng() - 0.5);
-    for (const side of sides) {
-      const pos = sidePosition(room, side);
-      if (!isNearDoor(room.index, side, pos.gx, pos.gy)) {
-        return pos;
-      }
-    }
-    return null;
-  }
+  // Built here (not at load time) so the materials are guaranteed to exist.
+  // Weights are percentages; the point pickups split the old 6% rare slot
+  // (60 / 20 / 15 / 5).
+  const ITEM_TABLE = [
+    { w: 45, type: 'blue_soda', mat: blueSodaMat },
+    { w: 23, type: 'purple_chocolate', mat: purpleChocolateMat },
+    { w: 12, type: 'walkie_talkie', mat: walkieTalkieMat },
+    { w: 8, type: 'wd40', mat: wd40Mat },
+    { w: 6, type: 'old_boots', mat: oldBootsMat },
+    { w: 3.6, type: 'point_orange', mat: orangePointMat },
+    { w: 1.2, type: 'point_green', mat: greenPointMat },
+    { w: 0.9, type: 'point_pink', mat: pinkPointMat },
+    { w: 0.3, type: 'point_mega', mat: megaPointMat },
+  ];
+
+  const SIZE = 0.8;
+  const MIN_GAP = 1.0;       // tiles between items in the same room
+  const TRIES_PER_SIDE = 3;  // re-roll the position if it's near a door / other item
+  const geom = new THREE.PlaneGeometry(SIZE, SIZE); // shared by all items
 
   rooms.forEach((room, ri) => {
-    // Difficulty chance check
-    if (rng() > settings.itemChance) return;
+    if (rng() > settings.itemChance) return; // difficulty chance
+    if (rng() < 0.2) return;                 // 20% of rooms stay empty
 
-    // Increased chance: 80% to have at least one item
-    if (rng() < 0.2) return;
+    const itemCount = rng() < 0.4 ? 2 : 1;   // up to 2 items per room
+    const placed = [];                       // grid positions used in this room
 
-    // Up to 2 items per room
-    const itemCount = rng() < 0.4 ? 2 : 1;
-    const sides = ['N', 'S', 'E', 'W'].sort(() => rng() - 0.5);
+    for (const side of shuffled(['N', 'S', 'E', 'W'])) {
+      if (placed.length >= itemCount) break;
 
-    let spawned = 0;
-    for (const side of sides) {
-      if (spawned >= itemCount) break;
-      const pos = sidePosition(room, side);
-      if (isNearDoor(ri, side, pos.gx, pos.gy)) {
-        continue;
+      let pos = null;
+      for (let t = 0; t < TRIES_PER_SIDE && !pos; t++) {
+        const p = sidePosition(room, side);
+        if (isNearDoor(ri, side, p.gx, p.gy)) continue;
+        if (placed.some(o => Math.hypot(o.gx - p.gx, o.gy - p.gy) < MIN_GAP)) continue;
+        pos = p;
       }
+      if (!pos) continue;
 
-      // choose item type
-      const r = rng();
-      let itemType, mat;
-      // Common items still fill most cases; rare chance to spawn point pickups (non-inventory)
-      if (r < 0.45) {
-        itemType = 'blue_soda';
-        mat = blueSodaMat;
-      } else if (r < 0.68) {
-        itemType = 'purple_chocolate';
-        mat = purpleChocolateMat;
-      } else if (r < 0.80) {
-        itemType = 'walkie_talkie';
-        mat = walkieTalkieMat;
-      } else if (r < 0.88) {
-        itemType = 'wd40';
-        mat = wd40Mat;
-      } else if (r < 0.94) {
-        // standard pickup item
-        itemType = 'old_boots';
-        mat = oldBootsMat;
-      } else {
-        // Rare: spawn a points pickup (one of 4 variants)
-        const pr = rng();
-        if (pr < 0.60) {
-          itemType = 'point_orange';
-          mat = orangePointMat;
-        } else if (pr < 0.80) {
-          itemType = 'point_green';
-          mat = greenPointMat;
-        } else if (pr < 0.95) {
-          itemType = 'point_pink';
-          mat = pinkPointMat;
-        } else {
-          itemType = 'point_mega';
-          mat = megaPointMat;
-        }
-      }
+      const { type, mat } = weightedPick(ITEM_TABLE);
 
-      const size = 0.8;
-      const geom = new THREE.PlaneGeometry(size, size);
       const mesh = new THREE.Mesh(geom, mat);
       mesh.position.set(pos.wx, wallHeight / 2, pos.wz);
-      mesh.userData.type = itemType;
+      mesh.userData.type = type;
       itemGroup.add(mesh);
-      itemStates.push({ mesh, type: itemType, roomIndex: ri, baseY: wallHeight / 2 });
-      spawned++;
+      itemStates.push({ mesh, type, roomIndex: ri, baseY: wallHeight / 2 });
+      placed.push(pos);
     }
   });
 }
@@ -4007,8 +3161,6 @@ function spawnHallwayItems() {
   });
 }
 
-
-
 // initial inventory HUD
 refreshInventoryHUD();
 
@@ -4075,8 +3227,7 @@ function useHeldItem() {
 
     // play chocolate crunch sound
     try {
-      purpleChocolateSound.currentTime = 0;
-      purpleChocolateSound.play();
+      audios.play('sfx', 'eating', 0.9, true);
     } catch (e) {
       // ignore playback errors
     }
@@ -4112,17 +3263,14 @@ function useHeldItem() {
         showNotebookOnMinimapUntil = now + 8.0;
       } else {
         // fallback behaviour: small beep if no notebooks available
-        try { walkieTalkieBeepSound.currentTime = 0; walkieTalkieBeepSound.play(); } catch (e) { }
+        try { audios.play('sfx', 'beep', 1.0, true); } catch { }
       }
     } else {
       // original behaviour: show enemy on minimap for 8 seconds
       showEnemyOnMinimapUntil = now + 8.0;
 
       // play walkie-talkie beep sound
-      try {
-        walkieTalkieBeepSound.currentTime = 0;
-        walkieTalkieBeepSound.play();
-      } catch (e) { }
+      try { audios.play('sfx', 'beep', 1.0, true); } catch { }
     }
   } else if (item.type === 'wd40') {
     // consume item unless inf items
@@ -4174,7 +3322,7 @@ function useHeldItem() {
     try {
       spraySound.currentTime = 0;
       spraySound.play();
-    } catch (e) { }
+    } catch { }
   } else if (item.type === 'old_boots') {
     // consume item unless inf items
     maybeConsume();
@@ -4184,10 +3332,7 @@ function useHeldItem() {
     sweepImmunityUntil = now + 240.0;
 
     // play rustle sound
-    try {
-      notebookPickupSound.currentTime = 0;
-      notebookPickupSound.play();
-    } catch (e) { }
+    try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
   }
 }
 
@@ -4221,22 +3366,17 @@ function goToMainMenu() {
   // persist points when leaving to main menu
   try {
     localStorage.setItem('rooms_maze_points', String(points));
-  } catch (e) { }
-  stopAllSounds();
+  } catch { }
+  audios.stopAll();
   // reset all-notebooks state
   allNotebooksCollectedAt = 0;
   enemySpeedBonus = 0.0;
   controls.unlock();
 
   // Hide In-Game UI
-  if (notebookCounterEl) notebookCounterEl.style.display = 'none';
-  if (seedDisplayEl) seedDisplayEl.style.display = 'none';
-  if (difficultyDisplayEl) difficultyDisplayEl.style.display = 'none';
-  if (inventoryEl) inventoryEl.style.display = 'none';
-  if (minimap) minimap.style.display = 'none';
-  if (pauseOverlay) pauseOverlay.style.display = 'none';
-  if (staminaBarEl) staminaBarEl.parentElement.style.display = 'none';
-  if (baldicatorEl) baldicatorEl.style.display = 'none';
+  for (const hud of [notebookCounterEl, seedDisplayEl, difficultyDisplayEl, inventoryEl, pauseOverlay, staminaBarEl, baldicatorEl])
+    hud.style.display = 'none';
+  if (minimap) minimap.canvas.style.display = 'none';
   if (crosshair) document.getElementById('crosshair').style.display = 'none';
 
   // Show Main Menu
@@ -4244,10 +3384,6 @@ function goToMainMenu() {
   isPaused = false;
   isGameOver = false;
   if (mainMenuEl) mainMenuEl.style.display = 'flex';
-
-  // Show watermark again if it was hidden
-  const wm = document.getElementById('watermark');
-  if (wm) wm.style.display = 'block';
 }
 
 // NEW: helper to pick random roaming target in hallways
@@ -4299,7 +3435,6 @@ function chaserCanSeePlayer() {
 
   // If any hit occurs before reaching the player
   if (hits.length > 0) return false;
-
   return true;
 }
 
@@ -4319,18 +3454,6 @@ function animate(time) {
   if (isMainMenu) {
     requestAnimationFrame(animate);
     return;
-  }
-
-  // If we're in the Level Editor mode, allow the normal update loop to run so the player can move,
-  // but keep editor UI visible and avoid forcing pointer-lock or main-menu transitions.
-  if (inLevelEditor) {
-    // Editor mode UI tweaks
-    if (staminaBarEl) staminaBarEl.parentElement.style.display = 'none';
-    if (document.getElementById('crosshair')) document.getElementById('crosshair').style.display = 'none';
-    // Keep minimap and inventory visible as context (they were enabled on enter)
-    drawMinimap();
-    // Do not return here so the rest of the loop (movement, rendering, lightweight updates) runs;
-    // heavy AI and timed systems will still run but the editor remains interactive and player can move.
   }
 
   // if paused, just keep rendering without updating game state
@@ -4384,14 +3507,14 @@ function animate(time) {
       return;
     }
     if (isJumpScare) applyEnvironmentShake();
-    drawMinimap();
+    minimap.draw();
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
     return;
   }
 
   // NEW: Debug Visuals
-  updateDebugVisuals();
+  if (DEBUG) updateDebugVisuals();
 
   // auto-close doors whose timer has expired
   // (now that we have `now` earlier, just reuse it)
@@ -4405,7 +3528,7 @@ function animate(time) {
       d.box.expandByScalar(0.15);
 
       // play close sound with distance-based volume
-      playDoorSoundForDoor(doorCloseSound, d.group);
+      playDoorSoundForDoor(audios.get('door', 'close'), d.group);
     }
   }
 
@@ -4779,11 +3902,11 @@ function animate(time) {
 
         // stop/mute other ambience so the scream is dominant
         try {
-          humSound.pause();
-        } catch (e) { }
+          audios.stop('sfx', 'humming', true);
+        } catch { }
         try {
           chaseMusic.pause();
-        } catch (e) { }
+        } catch { }
 
         // aim camera at top of billboard (face area), from a bit back so it's fully visible
         const faceTarget = new THREE.Vector3(
@@ -4838,7 +3961,7 @@ function animate(time) {
 
     // Manage Audio
     if (sweepAI.state !== 'IDLE') {
-      if (sweepSound.paused) { try { sweepSound.play(); } catch (e) { } }
+      if (sweepSound.paused) { try { sweepSound.play(); } catch { } }
       const d = sweepMesh.position.distanceTo(controls.object.position);
       const vol = Math.max(0, 1 - d / 30);
       sweepSound.volume = vol;
@@ -5467,88 +4590,6 @@ function animate(time) {
   // movement
   const baseSpeed = 3.9;
 
-  // Autoplay: simple AI that directs player toward nearest notebook, then exits.
-  // If Balder is close, try to use any blue soda in inventory to avoid him.
-  if (modAutoplay && !isGameOver && !isMainMenu) {
-    // find nearest uncollected notebook
-    let targetPos = null;
-    let bestDist = Infinity;
-    for (let i = 0; i < notebookStates.length; i++) {
-      const nb = notebookStates[i];
-      if (!nb || nb.collected) continue;
-      const d = controls.object.position.distanceTo(nb.mesh.position);
-      if (d < bestDist) {
-        bestDist = d;
-        targetPos = nb.mesh.position.clone();
-      }
-    }
-    // if no notebooks left, target an uncollected exit
-    if (!targetPos) {
-      for (const es of exitStates) {
-        if (!es || es.collected) continue;
-        const d = controls.object.position.distanceTo(es.mesh.position);
-        if (d < bestDist) {
-          bestDist = d;
-          targetPos = es.mesh.position.clone();
-        }
-      }
-    }
-
-    // If Balder is near (within 6 tiles), attempt to use blue soda if available
-    if (enemyMesh) {
-      const dBalder = controls.object.position.distanceTo(enemyMesh.position);
-      if (dBalder < TILE * 6) {
-        // find blue_soda index in inventory
-        const sodaIdx = inventory.findIndex(it => it && it.type === 'blue_soda');
-        if (sodaIdx !== -1) {
-          selectedInvIndex = sodaIdx;
-          try { useHeldItem(); } catch (e) { }
-        }
-      }
-    }
-
-    // If we have a target, compute a simple movement vector toward it and move the player a bit this frame
-    if (targetPos) {
-      // disable manual move flags while autoplay is active
-      move.fwd = move.back = move.left = move.right = move.sprint = false;
-
-      const playerPos = controls.object.position;
-      const dirTo = new THREE.Vector3().subVectors(targetPos, playerPos);
-      dirTo.y = 0;
-      if (dirTo.lengthSq() > 0.0001) {
-        dirTo.normalize();
-        // use a conservative autoplay speed (walk)
-        const autoSpeed = baseSpeed * 0.9 * (modSuperSpeed ? 2.25 : 1.0);
-        const step = dirTo.multiplyScalar(autoSpeed * dt);
-        const next = playerPos.clone().add(step);
-        if (!collides(next)) {
-          controls.object.position.copy(next);
-        } else {
-          // attempt axis sliding
-          const nextX = playerPos.clone().add(new THREE.Vector3(step.x, 0, 0));
-          if (!collides(nextX)) controls.object.position.copy(nextX);
-          const nextZ = playerPos.clone().add(new THREE.Vector3(0, 0, step.z));
-          if (!collides(nextZ)) controls.object.position.copy(nextZ);
-        }
-      }
-
-      // NEW: If the autoplay target is within interaction reach, perform interactions automatically
-      try {
-        const distToTarget = controls.object.position.distanceTo(targetPos);
-        if (distToTarget <= INTERACT_REACH) {
-          // Attempt pickups/interactions in the same priority order as player clicks
-          tryPickupItem();
-          tryCollectNotebook();
-          tryInteractExit();
-          // Also try opening door if applicable
-          tryOpenDoor();
-        }
-      } catch (e) {
-        // ignore any errors during automated interaction attempts
-      }
-    }
-  }
-
   // NEW: Stamina Logic
   // Reduce stamina drain based on notebooks collected (approx 6% less drain per notebook)
   const settings = diffSettings[currentDifficulty];
@@ -5580,9 +4621,7 @@ function animate(time) {
   }
 
   // Update stamina bar width
-  if (staminaBarEl) {
-    staminaBarEl.style.width = `${(currentStamina / maxStamina) * 100}%`;
-  }
+  if (staminaBarEl) staminaBarEl.style.width = `${(currentStamina / maxStamina) * 100}%`;
 
   // Disable sprint if no stamina (and not boosted)
   const canSprint = isSpeedBoostActive || currentStamina > 0;
@@ -5634,7 +4673,7 @@ function animate(time) {
     }
   }
 
-  drawMinimap();
+  minimap.draw();
 
   // NEW: Apply look behind rotation temporarily for rendering
   let originalRotation = null;
@@ -5648,37 +4687,49 @@ function animate(time) {
   renderer.render(scene, camera);
 
   // Restore camera rotation immediately after render so movement directions remain correct
-  if (isLookingBehind && originalRotation) {
-    camera.rotation.copy(originalRotation);
-  }
-
+  if (isLookingBehind && originalRotation) camera.rotation.copy(originalRotation);
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
 
-// FPS display: update every 1 second (delayed 1s) to reduce jitter
+// FPS display: reports once per second, driven by rAF timestamps.
 (function setupFpsDisplay() {
   const fpsEl = document.getElementById('fpsDisplay');
   if (!fpsEl) return;
+  fpsEl.style.display = 'block';
+
+  const REPORT_MS = 1000;
   let frames = 0;
-  let lastReport = performance.now();
+  let windowStart = 0;
+  let lastText = '';
 
-  // count frames continuously
-  (function countFrame() {
-    frames++;
-    requestAnimationFrame(countFrame);
-  })();
-
-  // report every 1000ms
-  setInterval(() => {
-    const now = performance.now();
-    const dt = (now - lastReport) / 1000;
-    lastReport = now;
-    const fps = Math.round(frames / Math.max(0.0001, dt));
+  function reset(t) {
     frames = 0;
-    fpsEl.textContent = `fps: ${fps}`;
-    fpsEl.style.display = 'block';
-  }, 1000);
+    windowStart = t;
+  }
+
+  function tick(t) {
+    if (!windowStart) reset(t);
+    frames++;
+
+    const elapsed = t - windowStart;
+    if (elapsed >= REPORT_MS) {
+      const text = Math.round((frames * 1000) / elapsed) + "fps";
+      if (text !== lastText) {
+        fpsEl.textContent = text;
+        lastText = text;
+      }
+      reset(t);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // After a tab switch the first window would be garbage, so start fresh.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) windowStart = 0;
+  });
+
+  requestAnimationFrame(tick);
 })();
 
 // helper to modulate chase music volume by distance (in world units)
@@ -5728,9 +4779,7 @@ function startPostJumpscareSequence() {
     try {
       postJumpscareSound.currentTime = 0;
       postJumpscareSound.play();
-    } catch (e) {
-      // ignore playback errors
-    }
+    } catch { }
   }
 
   setTimeout(() => {
@@ -5760,43 +4809,6 @@ function applyEnvironmentShake() {
       }
     }
   });
-}
-
-// NEW: stop all game sounds (called on win)
-function stopAllSounds() {
-  const sounds = [
-    humSound,
-    schoolhouseSound, // ensure this is stopped on win/menu
-    catchBuzzerSound,
-    chaseMusic,
-    windHowlSound,
-    notebookPickupSound,
-    walkieTalkieBeepSound,
-    purpleChocolateSound,
-    postJumpscareSound,
-    doorOpenSound,
-    doorCloseSound,
-    sodaOpenSound,
-    spraySound,
-    sweepSound // added
-  ];
-  for (const s of sounds) {
-    if (!s) continue;
-    try {
-      s.pause();
-      s.currentTime = 0;
-    } catch (e) {
-      // ignore audio errors
-    }
-  }
-
-  // also stop RUN.. specifically if present (defensive)
-  try {
-    if (typeof runSound !== 'undefined') {
-      runSound.pause();
-      runSound.currentTime = 0;
-    }
-  } catch (e) { }
 }
 
 // --- NEW: Save / Load level generation settings (JSON) ---

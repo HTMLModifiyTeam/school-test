@@ -1,3 +1,5 @@
+import { DIRS } from "./utils.js";
+
 /**
  * Room-and-corridor maze generator.
  *
@@ -33,14 +35,6 @@ export function generateRooms(gridW, gridH, roomSizes = [[3, 4], [5, 4], [6, 5],
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-const DIRS = [
-  { dx: 0, dy: -1, dir: 'N' },
-  { dx: 1, dy: 0, dir: 'E' },
-  { dx: 0, dy: 1, dir: 'S' },
-  { dx: -1, dy: 0, dir: 'W' },
-];
-
 const ROOM_PADDING = 2;   // empty tiles required around each room
 const TURN_COST = 2;      // discourages zig-zag corridors
 const RING_COST = 8;      // discourages hugging a room wall (except at the door)

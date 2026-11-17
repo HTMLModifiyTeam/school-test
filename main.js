@@ -17,7 +17,7 @@ let PR = Math.min(window.devicePixelRatio || 1, 2);
 const images = new ImageCache(IMG_CACHE, { root: 'assets/img' });
 const CACHED_IMG = await images.load();
 const audios = new AudioCache(AUDIO_CACHE, { root: 'assets/audio' });
-await audios.load();
+const CACHED_AUDIO = await audios.load();
 
 // Scene, camera, and controls must exist before we configure the renderer
 const scene = new THREE.Scene();
@@ -97,6 +97,7 @@ const joystickStickEl = document.getElementById('joystick-stick');
 const staminaBarEl = document.getElementById('staminaBar');
 const maxStamina = 100;
 let currentStamina = 100;
+
 // global points currency (persisted)
 let points = 0;
 
@@ -279,7 +280,7 @@ function setupModMenuBindings() {
     itemGroup.add(mesh);
     itemStates.push({ mesh, type, roomIndex: null, baseY: wallHeight / 2 });
     // immediate HUD feedback
-    try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
+    try { audios.play('sfx', 'notebookpickup') } catch { }
   }
 
   if (getItemBtn) {
@@ -306,7 +307,7 @@ function setupModMenuBindings() {
       }
       // ensure counter and visuals update
       updateNotebookCounter();
-      try { audios.play('sfx', 'beep', 1.0, true); } catch { }
+      try { audios.play('sfx', 'beep'); } catch { }
     });
   }
 
@@ -1277,7 +1278,10 @@ function initGame() {
   darkModeSpeedBonus = 0;
 
   // Play the schoolhouse loop when the game initializes; it should run until 2 notebooks are collected.
-  try { audios.play('music', 'schoolhouse', .9, true); } catch { }
+  try {
+    schoolhouseSound.currentTime = 0;
+    schoolhouseSound.play();
+  } catch { }
 
   // NOTE: Enemy (Balder) will NOT spawn at init. It will spawn when exactly 2 notebooks have been collected.
   // This prevents Balder from appearing immediately when play starts.
@@ -1482,7 +1486,10 @@ function enforceTwoNotebookRule() {
       }
       // Make sure schoolhouse loop plays while under threshold
       try {
-        if (audios.paused('music', 'schoolhouse')) audios.play('music', 'schoolhouse', 0.9, true);
+        if (schoolhouseSound.paused) {
+          schoolhouseSound.currentTime = 0;
+          schoolhouseSound.play();
+        }
       } catch { }
     } else {
       // When threshold met spawn Balder if missing and stop the schoolhouse loop.
@@ -1495,7 +1502,10 @@ function enforceTwoNotebookRule() {
         }
       }
       try {
-        if (!audios.paused('music', 'schoolhouse')) audios.stop('music', 'schoolhouse');
+        if (!schoolhouseSound.paused) {
+          schoolhouseSound.pause();
+          schoolhouseSound.currentTime = 0;
+        }
       } catch { }
     }
   } catch (err) {
@@ -1510,11 +1520,7 @@ function checkNotebookCompletion() {
 
   const settings = diffSettings[currentDifficulty];
   // Delayed spawn for easy mode
-  if (settings.spawnAt > 0 && notebooksCollected === settings.spawnAt && !enemyMesh) {
-    spawnEnemy();
-    // make sure he spawns far away from player if possible
-    // (re-randomize if too close is handled by standard RNG usually, but this is simple enough)
-  }
+  if (settings.spawnAt > 0 && notebooksCollected === settings.spawnAt && !enemyMesh) spawnEnemy();
 
   // NEW: Characters (enemy + NPCs) and the schoolhouse music are only present until more than 2 notebooks are collected.
   if (notebooksCollected >= 2) {
@@ -1532,7 +1538,10 @@ function checkNotebookCompletion() {
       npcStates.length = 0;
     }
     // Stop schoolhouse loop now that threshold is exceeded
-    try { audios.stop('music', 'schoolhouse') } catch { }
+    try {
+      schoolhouseSound.pause();
+      schoolhouseSound.currentTime = 0;
+    } catch { }
   }
 
   if (notebooksCollected >= totalRooms) {
@@ -1565,7 +1574,7 @@ function checkNotebookCompletion() {
     }
 
     // play wind howling sound
-    try { audios.play('sfx', 'wind', .85, true); } catch { }
+    try { audios.play('sfx', 'wind'); } catch { }
   }
 }
 
@@ -1581,17 +1590,12 @@ updateNotebookCounter();
       if (p && typeof p.catch === 'function') p.catch(() => { });
       return p;
     };
-  } catch (e) {
-    // If monkey-patch fails (e.g., environment restrictions), ignore and continue.
-    console.warn('safeAudioPlayPatch failed:', e);
-  }
+  } catch (e) { console.warn('safeAudioPlayPatch failed:', e); }
 })();
 
-// NEW: looped RUN.. sound that plays when all notebooks are collected
-const runSound = new Audio('./RUN..wav');
-runSound.loop = true;
-runSound.volume = 0.9;
-runSound.preload = 'auto';
+const schoolhouseSound = CACHED_AUDIO.music.schoolhouse;
+const runSound = CACHED_AUDIO.music.run;
+const chaseMusic = CACHED_AUDIO.music.chasing;
 
 // NEW: play button and mode toggle logic
 const mainMenuEl = document.getElementById('mainMenu');
@@ -1651,8 +1655,6 @@ if (seedInputHidden) {
       if (seedUI) seedUI.textContent = "seed: " + seedStr + "_";
     }
   });
-  // Handle blur? 
-  // For now let's rely on explicit toggle to keep the UI state consistent with the 'Active' flag
 }
 
 const savedLoudness = localStorage.getItem('rooms_maze_loudness');
@@ -1744,26 +1746,13 @@ if (playButtonEl) {
   });
 }
 
-// buzzer on catch (replaced with scream)
-const catchBuzzerSound = new Audio('./GAHHH.wav');
-catchBuzzerSound.preload = 'auto';
-catchBuzzerSound.volume = 1.0;
-
-// chase music, looped; volume controlled by distance
-const chaseMusic = new Audio('./ItReallyGetsBalder.wav');
-chaseMusic.loop = true;
-chaseMusic.preload = 'auto';
-
 // start hum and lock pointer on first game click (not on main menu)
 let humStarted = false;
 
 const LOCK_COOLDOWN_MS = 1300; // Chrome blocks re-lock ~1s after Esc
 let lastUnlockTime = 0;
 let lockTimer = null;
-
-controls.addEventListener('unlock', () => {
-  lastUnlockTime = performance.now();
-});
+controls.addEventListener('unlock', () => lastUnlockTime = performance.now());
 
 /**
  * Request pointer lock, waiting out the browser's post-exit cooldown.
@@ -1807,14 +1796,9 @@ canvas.addEventListener('click', () => {
 
   if (!humStarted) {
     humStarted = true;
-    try { audios.play('sfx', 'humming', .18, true); } catch { }
+    try { audios.play('sfx', 'humming'); } catch { }
   }
 });
-
-// sound that plays after the jumpscare during blackout
-const postJumpscareSound = new Audio('./bbbbb.wav');
-postJumpscareSound.preload = 'auto';
-postJumpscareSound.volume = 1.0;
 
 // full-screen blackout overlay for post-jumpscare
 const blackoutOverlay = document.createElement('div');
@@ -1843,26 +1827,10 @@ function playDoorSoundForDoor(audio, doorGroup) {
     audio.currentTime = 0;
     audio.volume = vol;
     audio.play();
-  } catch (e) {
-    // ignore playback errors
-  }
+  } catch { }
 }
 
-// NEW: soda open sound for blue soda usage
-const sodaOpenSound = new Audio('./soda-can-open-183214.mp3');
-sodaOpenSound.preload = 'auto';
-sodaOpenSound.volume = 0.85;
-
-// NEW: spray sound for wd40
-const spraySound = new Audio('./spray-bottle-36050.mp3');
-spraySound.preload = 'auto';
-spraySound.volume = 1.0;
-
-// NEW: Sweep sound
-const sweepSound = new Audio('./35f37130-9444-4e22-bbe3-982795157c9a.wav');
-sweepSound.preload = 'auto';
-sweepSound.loop = true;
-sweepSound.volume = 1.0;
+const sweepSound = CACHED_AUDIO.sfx.sweep;
 
 // colors / materials
 const loader = new THREE.TextureLoader();
@@ -2102,7 +2070,6 @@ const EXIT_DIRS = {
 function spawnExits() {
   const isFloor = (x, y) => x >= 0 && y >= 0 && x < GW && y < GH && grid[y][x];
 
-  // ---- 1. Collect every hallway wall face ----
   const candidates = [];
   for (let y = 0; y < GH; y++) {
     for (let x = 0; x < GW; x++) {
@@ -2129,11 +2096,7 @@ function spawnExits() {
     for (const c of candidates) {
       if (chosen.length >= num) break;
       if (chosen.includes(c)) continue;
-      const farEnough = chosen.every(o =>
-        o.x === c.x && o.y === c.y
-          ? minGap === 0 && o.dir !== c.dir          // same tile only as a last resort
-          : Math.hypot(o.x - c.x, o.y - c.y) >= minGap
-      );
+      const farEnough = chosen.every(o => o.x === c.x && o.y === c.y ? minGap === 0 && o.dir !== c.dir : Math.hypot(o.x - c.x, o.y - c.y) >= minGap);
       if (farEnough) chosen.push(c);
     }
     if (chosen.length >= num) break;
@@ -2151,10 +2114,7 @@ function spawnExits() {
     const wz = (c.y - GH / 2 + 0.5) * TILE + dy * TILE / 2;
 
     // replace the visual wall (its collider stays, exit is solid anyway)
-    const wallToRemove = wallGroup.children.find(w =>
-      Math.abs(w.position.x - wx) < epsilon &&
-      Math.abs(w.position.z - wz) < epsilon
-    );
+    const wallToRemove = wallGroup.children.find(w => Math.abs(w.position.x - wx) < epsilon && Math.abs(w.position.z - wz) < epsilon);
     if (wallToRemove) wallGroup.remove(wallToRemove);
 
     const mesh = new THREE.Mesh(geom, exitMat);
@@ -2205,7 +2165,7 @@ const npcStates = []; // { type, mesh, roomIndex, basePos, cooldown }
 
 // helper: send player to detention (principal behavior)
 let detentionActive = false;
-let detentionTimeout;
+let detentionTimeout = null;
 function sendPlayerToDetention(durationSec = 15) {
   if (detentionActive) return;
   // find principal room center
@@ -2258,7 +2218,7 @@ function bobAttemptSteal(state) {
   // small cooldown before next steal
   state.cooldown = clock.getElapsed() + 8.0;
   // play a light sound (reusing pickup) as feedback
-  try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
+  try { audios.play('sfx', 'notebookpickup') } catch { }
 }
 
 // helper: playgirl forces a brief interaction like Playtime
@@ -2672,7 +2632,7 @@ function openDoorState(door, openedByEnemy = false) {
   door.openUntil = now + 3.0;
 
   // play open sound with distance-based volume
-  playDoorSoundForDoor(audios.get('door', 'open'), door.group);
+  playDoorSoundForDoor(CACHED_AUDIO.door.open, door.group);
 
   // NEW: Check if door is within a silent area (WD40 effect)
   const doorPos = new THREE.Vector3();
@@ -2779,9 +2739,7 @@ function tryCollectNotebook() {
     localStorage.setItem('rooms_maze_points', String(points));
     // show animated feedback for +1
     showPointsEarned(1);
-  } catch (e) {
-    // ignore storage errors
-  }
+  } catch { }
   // update any info displays that show points
   updateInfoDisplays();
 
@@ -2793,7 +2751,7 @@ function tryCollectNotebook() {
   checkNotebookCompletion();
 
   // play pickup sound
-  try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
+  try { audios.play('sfx', 'notebookpickup') } catch { }
 
   // If this pickup resulted in collecting all notebooks, start the RUN.. loop and mark time
   if (totalRooms > 0 && notebooksCollected >= totalRooms) {
@@ -2805,9 +2763,7 @@ function tryCollectNotebook() {
       try {
         runSound.currentTime = 0;
         runSound.play();
-      } catch (e) {
-        // ignore autoplay/permission errors
-      }
+      } catch { }
     }
   }
 }
@@ -2845,13 +2801,11 @@ function tryPickupItem() {
       points = oldPoints + award;
       localStorage.setItem('rooms_maze_points', String(points));
       showPointsEarned(award);
-    } catch (e) {
-      // ignore storage errors
-    }
+    } catch { }
     updateInfoDisplays();
 
     // play pickup sound and remove the world mesh
-    try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
+    try { audios.play('sfx', 'notebookpickup') } catch { }
 
     itemGroup.remove(item.mesh);
     itemStates.splice(itemStates.indexOf(item), 1);
@@ -3182,20 +3136,13 @@ function useHeldItem() {
     maybeConsume();
 
     // play soda opening sound
-    try {
-      sodaOpenSound.currentTime = 0;
-      sodaOpenSound.play();
-    } catch (e) {
-      // ignore playback errors (e.g., autoplay restrictions)
-    }
+    try { audios.play('sfx', 'soda') } catch { }
 
     // spawn splash billboard
     const dirVec = new THREE.Vector3();
     camera.getWorldDirection(dirVec);
     dirVec.y = 0;
-    if (dirVec.lengthSq() === 0) {
-      dirVec.set(0, 0, -1);
-    }
+    if (dirVec.lengthSq() === 0) dirVec.set(0, 0, -1);
     dirVec.normalize();
 
     const splashSize = wallHeight;
@@ -3204,11 +3151,7 @@ function useHeldItem() {
 
     const origin = controls.object.position.clone();
     const startOffset = 0.6;
-    mesh.position.set(
-      origin.x + dirVec.x * startOffset,
-      splashSize / 2,
-      origin.z + dirVec.z * startOffset
-    );
+    mesh.position.set(origin.x + dirVec.x * startOffset, splashSize / 2, origin.z + dirVec.z * startOffset);
 
     // face along direction of travel
     const angle = Math.atan2(dirVec.x, dirVec.z);
@@ -3226,11 +3169,7 @@ function useHeldItem() {
     maybeConsume();
 
     // play chocolate crunch sound
-    try {
-      audios.play('sfx', 'eating', 0.9, true);
-    } catch (e) {
-      // ignore playback errors
-    }
+    try { audios.play('sfx', 'eating'); } catch { }
 
     // apply speed boost for 12 seconds (no dark mode / lighting changes)
     const now = clock.getElapsed();
@@ -3238,7 +3177,6 @@ function useHeldItem() {
 
     // immediately top off stamina
     currentStamina = maxStamina;
-
   } else if (item.type === 'walkie_talkie') {
     // consume item unless inf items
     maybeConsume();
@@ -3263,14 +3201,14 @@ function useHeldItem() {
         showNotebookOnMinimapUntil = now + 8.0;
       } else {
         // fallback behaviour: small beep if no notebooks available
-        try { audios.play('sfx', 'beep', 1.0, true); } catch { }
+        try { audios.play('sfx', 'beep'); } catch { }
       }
     } else {
       // original behaviour: show enemy on minimap for 8 seconds
       showEnemyOnMinimapUntil = now + 8.0;
 
       // play walkie-talkie beep sound
-      try { audios.play('sfx', 'beep', 1.0, true); } catch { }
+      try { audios.play('sfx', 'beep'); } catch { }
     }
   } else if (item.type === 'wd40') {
     // consume item unless inf items
@@ -3320,8 +3258,7 @@ function useHeldItem() {
 
     // Play spray sound
     try {
-      spraySound.currentTime = 0;
-      spraySound.play();
+      audios.play('sfx', 'spray');
     } catch { }
   } else if (item.type === 'old_boots') {
     // consume item unless inf items
@@ -3332,7 +3269,7 @@ function useHeldItem() {
     sweepImmunityUntil = now + 240.0;
 
     // play rustle sound
-    try { audios.play('sfx', 'notebookpickup', 1.0, true) } catch { }
+    try { audios.play('sfx', 'notebookpickup') } catch { }
   }
 }
 
@@ -3528,7 +3465,7 @@ function animate(time) {
       d.box.expandByScalar(0.15);
 
       // play close sound with distance-based volume
-      playDoorSoundForDoor(audios.get('door', 'close'), d.group);
+      playDoorSoundForDoor(CACHED_AUDIO.door.close, d.group);
     }
   }
 
@@ -3916,13 +3853,10 @@ function animate(time) {
         );
         const backDir = new THREE.Vector3().subVectors(controls.object.position, enemyMesh.position);
         backDir.y = 0;
-        if (backDir.lengthSq() === 0) {
-          backDir.set(0, 0, 1);
-        }
+        if (backDir.lengthSq() === 0) backDir.set(0, 0, 1);
         // bring camera much closer to the billboard
         backDir.normalize().multiplyScalar(0.4);
         const newPos = new THREE.Vector3().addVectors(enemyMesh.position, backDir);
-        // raise camera relative to the enemy's billboard, but not too high
         controls.object.position.set(newPos.x, enemyMesh.position.y + ENEMY_HEIGHT * 0.5, newPos.z);
         camera.lookAt(faceTarget);
 
@@ -3931,28 +3865,14 @@ function animate(time) {
 
         // play jumpscare scream
         try {
-          if (isLoudnessEnabled) {
-            catchBuzzerSound.currentTime = 0;
-            catchBuzzerSound.play();
-          } else {
-            // Replaces loud scream with bbbbb.wav
-            postJumpscareSound.currentTime = 0;
-            postJumpscareSound.play();
-          }
-        } catch (e) {
-          // ignore playback errors
-        }
+          if (isLoudnessEnabled) audios.play('jumpscares', 'jumpscare');
+          else audios.play('jumpscares', 'jumpscare2');
+        } catch { }
 
-        // after the visible jumpscare, start blackout + post-jumpscare sound
-        setTimeout(() => {
-          startPostJumpscareSequence();
-        }, 2000);
+        setTimeout(() => startPostJumpscareSequence(), 2000);
       }
     }
-  } else {
-    // if no enemy, ensure chase music is stopped
-    updateChaseMusic(controls.object.position, controls.object.position);
-  }
+  } else updateChaseMusic(controls.object.position, controls.object.position);
 
   // SWEEP AI LOGIC
   if (sweepMesh && sweepAI.active) {
@@ -3965,9 +3885,7 @@ function animate(time) {
       const d = sweepMesh.position.distanceTo(controls.object.position);
       const vol = Math.max(0, 1 - d / 30);
       sweepSound.volume = vol;
-    } else {
-      sweepSound.volume = 0;
-    }
+    } else sweepSound.volume = 0;
 
     if (sweepAI.state === 'IDLE') {
       if (now >= sweepAI.nextSweepTime) {
@@ -4771,20 +4689,9 @@ function updateChaseMusic(playerPos, enemyPos) {
 }
 
 function startPostJumpscareSequence() {
-  // show blackout overlay and play the post-jumpscare sound,
-  // then reload after the sound duration (3 seconds)
   blackoutOverlay.style.display = 'block';
-
-  if (isLoudnessEnabled) {
-    try {
-      postJumpscareSound.currentTime = 0;
-      postJumpscareSound.play();
-    } catch { }
-  }
-
-  setTimeout(() => {
-    window.location.reload();
-  }, 3000);
+  if (isLoudnessEnabled) audios.play('jumpscares', 'jumpscare2');
+  setTimeout(() => window.location.reload(), 3000);
 }
 
 function applyEnvironmentShake() {
@@ -4796,9 +4703,6 @@ function applyEnvironmentShake() {
   const stepAmount = 0.05;
   const maxIntensity = 0.8;
   const intensity = Math.min(maxIntensity, base + steps * stepAmount);
-
-  // keep jumpscare sound at normal pitch (no playback rate modulation)
-  catchBuzzerSound.playbackRate = 1.0;
 
   [floorGroup, roofGroup, wallGroup, doorGroup].forEach(group => {
     for (const mesh of group.children) {

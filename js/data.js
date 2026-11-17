@@ -26,8 +26,8 @@ export const AUDIO_CACHE = {
     { snd: 'jumpscare2.wav' },
   ],
   door: [
-    { snd: 'door/close.mp3' },
-    { snd: 'door/open.mp3' },
+    { snd: 'close.mp3' },
+    { snd: 'open.mp3' },
   ],
   sfx: [
     { snd: 'beep.mp3', vol: 0.9 },

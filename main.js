@@ -3,9 +3,9 @@ import Minimap from './js/minimap.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { generateRooms } from './js/maze.js';
 import { findNextStep, getRandomHallwayPosition } from './js/pathfinding.js';
-import { isPositionInRoom, pointTex, DIRS } from './js/utils.js';
+import { isPositionInRoom, pointTex, DIRS, mulberry32 } from './js/utils.js';
 import { ImageCache, AudioCache } from './js/cache.js';
-import { IMG_CACHE, AUDIO_CACHE } from './js/data.js';
+import { IMG_CACHE, AUDIO_CACHE, POINT_MULTIPLIERS } from './js/data.js';
 
 const DEBUG = false;
 const isMobile = navigator.maxTouchPoints > 0;
@@ -295,13 +295,11 @@ function setupModMenuBindings() {
     tpNotebooksBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const p = controls.object.position.clone();
-      let offset = 0;
       for (const nb of notebookStates) {
         if (!nb) continue;
         // teleport only uncollected ones
         if (!nb.collected) {
-          offset += 0.35;
-          nb.mesh.position.set(p.x + (Math.random() - 0.5) * 0.6, nb.baseY, p.z + offset);
+          nb.mesh.position.set(p.x, nb.baseY, p.z);
           nb.mesh.visible = true;
         }
       }
@@ -316,7 +314,7 @@ function setupModMenuBindings() {
     noDarkChk.addEventListener('change', (e) => {
       e.stopPropagation();
       modNoDarkness = !!noDarkChk.checked;
-      if (modNoDarkness) {
+      if (!modNoDarkness) {
         scene.fog.color.setHex(0xffffff);
         scene.background = new THREE.Color(0xffffff);
       }
@@ -668,17 +666,9 @@ function initGame() {
   try {
     const savedPoints = localStorage.getItem('rooms_maze_points');
     points = savedPoints !== null ? parseInt(savedPoints, 10) || 0 : 0;
-  } catch (e) {
-    points = 0;
-  }
+  } catch { points = 0; }
 
-  // Mulberry32
-  rng = function () {
-    let t = seedVal += 0x6D2B79F5;
-    t = Math.imul(t ^ t >>> 15, t | 1);
-    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  }
+  rng = mulberry32(seedVal);
 
   // Clear existing
   floorGroup.clear();
@@ -751,11 +741,9 @@ function initGame() {
     try {
       const maxFloorsEl = document.getElementById('levelMaxFloorsInput');
       if (maxFloorsEl) maxFloors = parseInt(maxFloorsEl.value, 10);
-    } catch (e) {
-      // ignore and keep existing maxFloors if parsing fails
-    }
+    } catch { } // ignore and keep existing maxFloors if parsing fails
     if (corruptEl) genCorruptMaze = !!corruptEl.checked;
-  } catch (e) {
+  } catch {
     // fallback to defaults on any parsing error
     genAttempts = 600;
     genTargetRooms = 12;
@@ -773,14 +761,13 @@ function initGame() {
     const sizeZEl = document.getElementById('roomSizeZInput');
     const sx = sizeXEl ? parseInt(sizeXEl.value, 10) : NaN;
     const sz = sizeZEl ? parseInt(sizeZEl.value, 10) : NaN;
-    if (Number.isInteger(sx) && Number.isInteger(sz) && sx >= 1 && sz >= 1) {
+    if (Number.isInteger(sx) && Number.isInteger(sz)) {
       // pass a single allowed room size derived from inputs
       roomSizesParam = [[sx, sz]];
     }
-  } catch (e) { roomSizesParam = undefined; }
+  } catch { roomSizesParam = undefined; }
 
   const result = generateRooms(GW, GH, roomSizesParam, genAttempts, genTargetRooms);
-  // If the generator returned blockedDoorEdges, keep them; otherwise default
   grid = result.grid;
   rooms = result.rooms;
   doors = result.doors;
@@ -797,16 +784,12 @@ function initGame() {
         if (rng() < 0.02) grid[y][x] = 0;
       }
     }
-    // After corruption, we don't rebuild rooms/doors here; collision creation will reflect the new grid.
   }
 
-  // NEW: Reserve a room for Principal (detention) if there is at least one room
   principalRoomIndex = -1;
   if (rooms.length) {
-    // choose a random room to be "detention"
-    principalRoomIndex = Math.floor(rng() * rooms.length);
-    // mark it for easy lookup (userData)
-    rooms[principalRoomIndex].isDetention = true;
+    principalRoomIndex = Math.floor(rng() * rooms.length); // choose a random room to be "detention"
+    rooms[principalRoomIndex].isDetention = true; // mark it for easy lookup (userData)
   }
 
   // Read spawn-other-characters toggle early so sweep/principal spawns respect it
@@ -814,9 +797,7 @@ function initGame() {
     try {
       const el = document.getElementById('spawnOtherCharChk');
       return el ? !!el.checked : true;
-    } catch (e) {
-      return true;
-    }
+    } catch { return true; }
   })();
 
   // Setup Sweep Base (only spawn sweep if spawnOthers is enabled)
@@ -903,284 +884,170 @@ function initGame() {
       }
     }
   }
+  // ---------- constants & lookup tables ----------
+  const POSTER_CHANCE = 0.1;  // your comment said 1-in-12 but the code used 0.1; pick one
+  const POSTER_MIN_DIST_SQ = 9;    // 3-cell radius
+  const POSTER_SAME_TEX_SQ = 49;   // 7-cell radius
+  const ROOF_Z_OFFSET = 0.02; // avoids z-fighting
 
-  // Pre-calculate blocked paths where walls exist between connected grid cells
-  for (const b of blockedDoorEdges) {
-    let nx = b.x, ny = b.y;
-    if (b.dir === 'N') ny -= 1;
-    else if (b.dir === 'S') ny += 1;
-    else if (b.dir === 'E') nx += 1;
-    else if (b.dir === 'W') nx -= 1;
-    // Store blocked edge bidirectionally: "x,y|nx,ny"
+  const DIR_BY_NAME = Object.fromEntries(DIRS.map(d => [d.dir, d]));
+  const OPPOSITE = { N: 'S', S: 'N', E: 'W', W: 'E' };
+  // Plane normal must face the interior cell that owns the wall
+  const WALL_ROT_Y = { N: 0, S: Math.PI, E: -Math.PI / 2, W: Math.PI / 2 };
+
+  const cellCenter = (x, y) => ({
+    cx: (x - GW / 2 + 0.5) * TILE,
+    cz: (y - GH / 2 + 0.5) * TILE,
+  });
+  const isFloor = (x, y) => x >= 0 && x < GW && y >= 0 && y < GH && grid[y][x];
+
+  // ---------- shared geometry (was: a new geometry per tile/wall) ----------
+  const tileGeom = new THREE.PlaneGeometry(TILE, TILE);
+  const wallGeom = new THREE.PlaneGeometry(TILE, wallHeight);
+
+  // ---------- blocked paths (bidirectional) ----------
+  for (const b of blockedDoorEdges ?? []) {
+    const { dx, dy } = DIR_BY_NAME[b.dir];
+    const nx = b.x + dx, ny = b.y + dy;
     blockedPathSet.add(`${b.x},${b.y}|${nx},${ny}`);
     blockedPathSet.add(`${nx},${ny}|${b.x},${b.y}`);
   }
 
-  // Create floor tiles and roof
-  for (let y = 0; y < GH; y++) {
-    for (let x = 0; x < GW; x++) {
-      if (grid[y][x]) {
-        const floor = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE), floorMat);
-        floor.rotation.x = -Math.PI / 2;
-        floor.position.set((x - GW / 2 + 0.5) * TILE, 0, (y - GH / 2 + 0.5) * TILE);
-        floor.receiveShadow = true;
-        // store base rotation for shake effect
-        floor.userData.baseRotation = floor.rotation.clone();
-        floorGroup.add(floor);
+  // ---------- floors & roofs: one InstancedMesh each (2 draw calls total) ----------
+  const floorCells = [];
+  for (let y = 0; y < GH; y++)
+    for (let x = 0; x < GW; x++)
+      if (grid[y][x]) floorCells.push({ x, y });
 
-        const roof = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE), roofMat);
-        roof.rotation.x = Math.PI / 2;
-        // place roof exactly on top of walls (slightly above to avoid z-fighting)
-        roof.position.set((x - GW / 2 + 0.5) * TILE, wallHeight - 0.02, (y - GH / 2 + 0.5) * TILE);
-        // store base rotation for shake effect
-        roof.userData.baseRotation = roof.rotation.clone();
-        roofGroup.add(roof);
-      }
+  const floors = new THREE.InstancedMesh(tileGeom, floorMat, floorCells.length);
+  const roofs = new THREE.InstancedMesh(tileGeom, roofMat, floorCells.length);
+  floors.receiveShadow = true;
+
+  const dummy = new THREE.Object3D();
+  floorCells.forEach(({ x, y }, i) => {
+    const { cx, cz } = cellCenter(x, y);
+
+    dummy.position.set(cx, 0, cz);
+    dummy.rotation.set(-Math.PI / 2, 0, 0);
+    dummy.updateMatrix();
+    floors.setMatrixAt(i, dummy.matrix);
+
+    dummy.position.set(cx, wallHeight - ROOF_Z_OFFSET, cz);
+    dummy.rotation.set(Math.PI / 2, 0, 0);
+    dummy.updateMatrix();
+    roofs.setMatrixAt(i, dummy.matrix);
+  });
+  floorGroup.add(floors);
+  roofGroup.add(roofs);
+
+  // ---------- walls ----------
+  const doorEdgeSet = new Set((doors ?? []).map(d => `${d.x},${d.y},${d.dir}`));
+  const builtWalls = new Set();   // dedupe "x,y,dir"
+  const posterCells = [];          // { x, y, matIndex }
+
+  function addWall(x, y, dirName, material) {
+    const key = `${x},${y},${dirName}`;
+    if (builtWalls.has(key)) return;
+    builtWalls.add(key);
+
+    const { dx, dy } = DIR_BY_NAME[dirName];
+    const { cx, cz } = cellCenter(x, y);
+
+    const mesh = new THREE.Mesh(wallGeom, material);
+    mesh.position.set(cx + (dx * TILE) / 2, wallHeight / 2, cz + (dy * TILE) / 2);
+    mesh.rotation.y = WALL_ROT_Y[dirName];
+    mesh.userData.baseRotation = mesh.rotation.clone(); // for shake effect
+
+    wallGroup.add(mesh);
+    colliders.push(mesh);
+  }
+
+  function pickPosterMaterial(x, y) {
+    if (!posterMats.length || rng() >= POSTER_CHANCE) return null;
+
+    const used = new Set();
+    for (const p of posterCells) {
+      const d2 = (p.x - x) ** 2 + (p.y - y) ** 2;
+      if (d2 <= POSTER_MIN_DIST_SQ) return null;          // too close to another poster
+      if (d2 <= POSTER_SAME_TEX_SQ) used.add(p.matIndex); // texture already nearby
+    }
+
+    let candidates = [];
+    for (let i = 0; i < posterMats.length; i++) if (!used.has(i)) candidates.push(i);
+    if (!candidates.length) candidates = posterMats.map((_, i) => i); // fallback: any
+
+    const idx = candidates[Math.floor(rng() * candidates.length)];
+    posterCells.push({ x, y, matIndex: idx });
+    return posterMats[idx];
+  }
+
+  for (const { x, y } of floorCells) {
+    const hallway = !roomAtGrid(x, y);               // hoisted out of the direction loop
+    for (const n of DIRS) {
+      if (isFloor(x + n.dx, y + n.dy)) continue;     // neighbor is open: no wall
+      if (doorEdgeSet.has(`${x},${y},${n.dir}`)) continue;
+      addWall(x, y, n.dir, (hallway && pickPosterMaterial(x, y)) || wallMat);
     }
   }
 
-  // Build walls
-  // Build a quick lookup for door edges so we can skip walls where a door exists
-  const doorEdgeSet = new Set();
-  if (Array.isArray(doors)) {
-    for (const d of doors) {
-      doorEdgeSet.add(`${d.x},${d.y},${d.dir}`);
-    }
+  // Solid walls on blocked door edges.
+  // Planes are single-sided, so build one for each side — previously the
+  // neighbouring cell saw through the wall (and only the collider stopped you).
+  for (const b of blockedDoorEdges ?? []) {
+    const { dx, dy } = DIR_BY_NAME[b.dir];
+    addWall(b.x, b.y, b.dir, wallMat);
+    if (isFloor(b.x + dx, b.y + dy)) addWall(b.x + dx, b.y + dy, OPPOSITE[b.dir], wallMat);
   }
 
-  // NEW: track hallway cells that already have posters to enforce spacing
-  const posterCells = [];
+  // ---------- doors ----------
+  const boxOf = (obj, pad) => {
+    obj.updateWorldMatrix(true, true);   // don't rely on the scene having rendered yet
+    return new THREE.Box3().setFromObject(obj).expandByScalar(pad);
+  };
 
-  for (let y = 0; y < GH; y++) {
-    for (let x = 0; x < GW; x++) {
-      if (!grid[y][x]) continue;
-      const cx = (x - GW / 2 + 0.5) * TILE;
-      const cz = (y - GH / 2 + 0.5) * TILE;
-      // check four neighbors; if neighbor is empty -> wall
-      for (const n of DIRS) {
-        const nx = x + n.dx, ny = y + n.dy;
-        const needWall = (nx < 0 || nx >= GW || ny < 0 || ny >= GH) || !grid[ny][nx];
-        if (!needWall) continue;
+  for (const d of doors ?? []) {
+    const { dx, dy } = DIR_BY_NAME[d.dir];
+    const { cx, cz } = cellCenter(d.x, d.y);
 
-        // skip this wall if it corresponds to a door edge
-        if (doorEdgeSet.has(`${x},${y},${n.dir}`)) continue;
+    const group = new THREE.Group();
+    group.position.set(cx + (dx * TILE) / 2, wallHeight / 2, cz + (dy * TILE) / 2);
+    group.rotation.y = WALL_ROT_Y[d.dir];
+    group.userData.baseRotation = group.rotation.clone(); // for shake effect
 
-        // Wall as a single plane facing into the room/corridor
-        const geom = new THREE.PlaneGeometry(
-          TILE,          // full tile width
-          wallHeight     // uniform wall height
-        );
+    // Two single-sided planes at the same spot: front faces the room, back the corridor
+    const front = new THREE.Mesh(wallGeom, doorClosedMat);
+    const back = new THREE.Mesh(wallGeom, doorClosedMat);
+    back.rotation.y = Math.PI;
 
-        // NEW: 1-in-12 chance to turn hallway walls into posters (random poster texture),
-        // but only if no other poster is within a 3-cell radius.
-        let wallMaterial = wallMat;
-        const isHallwayTile = !roomAtGrid(x, y);
-        if (isHallwayTile && posterMats.length && rng() < 0.1) {
-          let tooClose = false;
-          for (const p of posterCells) {
-            const dx = p.x - x;
-            const dy = p.y - y;
-            if (dx * dx + dy * dy <= 9) { // 3-cell radius
-              tooClose = true;
-              break;
-            }
-          }
-          if (!tooClose) {
-            // Check neighbors within 7-cell radius to avoid same poster texture
-            const usedIndices = new Set();
-            for (const p of posterCells) {
-              const dx = p.x - x;
-              const dy = p.y - y;
-              if (dx * dx + dy * dy <= 49) { // 7^2 = 49
-                if (p.matIndex !== undefined) usedIndices.add(p.matIndex);
-              }
-            }
+    group.add(front, back);
+    doorGroup.add(group);
 
-            // Find available indices that are NOT used nearby
-            const availableIndices = [];
-            for (let i = 0; i < posterMats.length; i++) {
-              if (!usedIndices.has(i)) availableIndices.push(i);
-            }
-
-            // If all variants are used nearby (unlikely), fallback to all indices
-            if (availableIndices.length === 0) {
-              for (let i = 0; i < posterMats.length; i++) availableIndices.push(i);
-            }
-
-            const chosenIdx = availableIndices[Math.floor(rng() * availableIndices.length)];
-            wallMaterial = posterMats[chosenIdx];
-            posterCells.push({ x, y, matIndex: chosenIdx });
-          }
-        }
-
-        const mesh = new THREE.Mesh(geom, wallMaterial);
-        mesh.position.set(
-          cx + (n.dx * TILE) / 2,
-          wallHeight / 2,
-          cz + (n.dy * TILE) / 2
-        );
-
-        // Orient plane so its front side faces the interior tile (this cell)
-        if (n.dir === 'N') {
-          // neighbor is north, interior is south => normal +Z
-          mesh.rotation.y = 0;
-        } else if (n.dir === 'S') {
-          // neighbor is south, interior is north => normal -Z
-          mesh.rotation.y = Math.PI;
-        } else if (n.dir === 'E') {
-          // neighbor is east, interior is west => normal -X
-          mesh.rotation.y = -Math.PI / 2;
-        } else if (n.dir === 'W') {
-          // neighbor is west, interior is east => normal +X
-          mesh.rotation.y = Math.PI / 2;
-        }
-
-        wallGroup.add(mesh);
-        colliders.push(mesh);
-      }
-    }
+    doorStates.push({
+      group, front, back,
+      box: boxOf(group, .15),
+      openUntil: 0,
+      isOpen: false,
+      roomIndex: d.room,
+    });
   }
 
-  // Add solid walls for non-door candidate edges
-  if (Array.isArray(blockedDoorEdges)) {
-    for (const b of blockedDoorEdges) {
-      const x = b.x;
-      const y = b.y;
-      const dir = b.dir;
-
-      const cx = (x - GW / 2 + 0.5) * TILE;
-      const cz = (y - GH / 2 + 0.5) * TILE;
-
-      const geom = new THREE.PlaneGeometry(TILE, wallHeight);
-
-      // For blocked door edges we keep the standard wall material (room-side walls)
-      const mesh = new THREE.Mesh(geom, wallMat);
-
-      let dx = 0, dz = 0, rotY = 0;
-      if (dir === 'N') {
-        dz = -TILE / 2;
-        rotY = 0;
-      } else if (dir === 'S') {
-        dz = TILE / 2;
-        rotY = Math.PI;
-      } else if (dir === 'W') {
-        dx = -TILE / 2;
-        rotY = Math.PI / 2;
-      } else if (dir === 'E') {
-        dx = TILE / 2;
-        rotY = -Math.PI / 2;
-      }
-
-      mesh.position.set(cx + dx, wallHeight / 2, cz + dz);
-      mesh.rotation.y = rotY;
-
-      wallGroup.add(mesh);
-      colliders.push(mesh);
-    }
-  }
-
-  for (const wall of wallGroup.children) {
-    // store base rotation for shake effect
-    wall.userData.baseRotation = wall.rotation.clone();
-  }
-
-  // colliderBoxes update in separate step but here we can't easily access the const colliderBoxes
-  // so we'll just rebuild them after
-
-  // Create doors
-  if (Array.isArray(doors)) {
-    for (const d of doors) {
-      const x = d.x;
-      const y = d.y;
-      const dir = d.dir;
-
-      const cx = (x - GW / 2 + 0.5) * TILE;
-      const cz = (y - GH / 2 + 0.5) * TILE;
-
-      const geom = new THREE.PlaneGeometry(TILE, wallHeight);
-
-      // group with separate front (room-facing) and back (corridor-facing) planes
-      const group = new THREE.Group();
-
-      const front = new THREE.Mesh(geom, doorClosedMat);
-      const back = new THREE.Mesh(geom, doorClosedMat);
-
-      let dx = 0, dz = 0, rotY = 0;
-      if (dir === 'N') {
-        dz = -TILE / 2;
-        rotY = 0;
-      } else if (dir === 'S') {
-        dz = TILE / 2;
-        rotY = Math.PI;
-      } else if (dir === 'W') {
-        dx = -TILE / 2;
-        rotY = Math.PI / 2;
-      } else if (dir === 'E') {
-        dx = TILE / 2;
-        rotY = -Math.PI / 2;
-      }
-
-      group.position.set(cx + dx, wallHeight / 2, cz + dz);
-      group.rotation.y = rotY;
-
-      // front faces the room, back faces the corridor
-      // aligned with wall (single plane look)
-      front.position.set(0, 0, 0);
-      front.rotation.set(0, 0, 0);
-
-      back.position.set(0, 0, 0);
-      back.rotation.y = Math.PI;
-
-      group.add(front);
-      group.add(back);
-
-      doorGroup.add(group);
-
-      // store base rotation for shake effect
-      group.userData.baseRotation = group.rotation.clone();
-
-      const box = new THREE.Box3().setFromObject(group);
-      // expand box for consistent collision thickness
-      box.expandByScalar(0.15);
-
-      doorStates.push({
-        group,
-        front,
-        back,
-        box,
-        openUntil: 0,
-        isOpen: false,
-        roomIndex: d.room
-      });
-    }
-  }
-
-  // Notebooks
+  // ---------- notebooks ----------
   for (const r of rooms) {
-    const cx = (r.x + r.w / 2 - GW / 2) * TILE;
-    const cz = (r.y + r.h / 2 - GH / 2) * TILE;
-    const geom = new THREE.PlaneGeometry(1.2, 1.2);
-    const mesh = new THREE.Mesh(geom, notebookMat);
-    mesh.position.set(cx, wallHeight / 2, cz);
-    // billboard the notebook to always face the camera initially
-    mesh.rotation.y = 0;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), notebookMat);
+    mesh.position.set((r.x + r.w / 2 - GW / 2) * TILE, wallHeight / 2, (r.y + r.h / 2 - GH / 2) * TILE);
     notebookGroup.add(mesh);
-    // store room index for the notebook so we can avoid spawning enemy exactly in that room when it's just collected
+
     notebookStates.push({
       mesh,
       collected: false,
       baseY: wallHeight / 2,
-      roomIndex: r.id !== undefined ? r.id : null
+      roomIndex: r.id ?? null,   // used to avoid spawning the enemy in a just-collected room
     });
   }
 
-  // Re-calc collider boxes
+  // ---------- collider boxes ----------
   colliderBoxes.length = 0;
-  for (const c of colliders) {
-    const box = new THREE.Box3().setFromObject(c);
-    box.expandByScalar(0.3);
-    colliderBoxes.push(box);
-  }
+  for (const c of colliders) colliderBoxes.push(boxOf(c, .3));
 
   function spawnPlayer() {
     if (!rooms.length) return;
@@ -1217,7 +1084,6 @@ function initGame() {
           return;
         }
       }
-      // fall through to the hallway/room fallbacks
     }
 
     // ---- 2. Random free hallway tile ----
@@ -1253,13 +1119,10 @@ function initGame() {
 
   // Reset scene environment
   scene.background = new THREE.Color(0xffffff);
-  scene.fog.near = 2;
-  scene.fog.far = 35;
-
-  if (settings.fog !== undefined) {
-    scene.fog.color.setHex(settings.fog);
-  } else {
-    scene.fog.color.setHex(0xffffff);
+  if (!modNoDarkness) {
+    scene.fog.near = 2;
+    scene.fog.far = 35;
+    scene.fog.color.setHex(settings.fog !== undefined ? settings.fog : 0xFFFFFF);
   }
 
   // Restore lighting and clear any dark-mode audio/state that may have persisted
@@ -1559,7 +1422,6 @@ function checkNotebookCompletion() {
       scene.background = new THREE.Color(0x000000);
       if (scene.fog) {
         scene.fog.color.setHex(settings.darkFog);
-        // extremely dense black fog
         scene.fog.near = 0.4;
         scene.fog.far = 12;
       }
@@ -1567,9 +1429,7 @@ function checkNotebookCompletion() {
       // make lights almost completely dark
       setTimeout(() => {
         dir.intensity = 0.05;
-        if (typeof ambientLight !== 'undefined' && ambientLight) {
-          ambientLight.intensity = 0.03;
-        }
+        if (typeof ambientLight !== 'undefined' && ambientLight) ambientLight.intensity = 0.03;
       }, 0);
     }
 
@@ -1793,7 +1653,6 @@ canvas.addEventListener('click', () => {
 
   // Use safeLock to avoid "Pointer lock cannot be acquired immediately" errors
   safeLock();
-
   if (!humStarted) {
     humStarted = true;
     try { audios.play('sfx', 'humming'); } catch { }
@@ -2329,7 +2188,6 @@ const inventory = [null, null, null, null, null];
 let selectedInvIndex = 0;
 
 // helper: update inventory HUD visuals
-
 function setSlotIcon(iconEl, src) {
   if (!src) {
     if (iconEl.style.display !== 'none') {
@@ -2338,8 +2196,7 @@ function setSlotIcon(iconEl, src) {
     }
     return;
   }
-  // Compare against the attribute we set, not iconEl.src (which the browser
-  // resolves to an absolute URL, so the original comparison needed endsWith)
+
   if (iconEl.dataset.src !== src) {
     iconEl.src = src;
     iconEl.dataset.src = src;
@@ -2768,86 +2625,71 @@ function tryCollectNotebook() {
   }
 }
 
-// NEW: picking up items into inventory (blue soda, purple chocolate)
+// ---------- item config ----------
+const POINT_BASE_MIN = 55;
+const POINT_BASE_MAX = 75;
+
+// Material to show on a world item of each inventory type
+const ITEM_MATERIALS = {
+  blue_soda: blueSodaMat,
+  purple_chocolate: purpleChocolateMat,
+  walkie_talkie: walkieTalkieMat,
+  wd40: wd40Mat,
+  old_boots: oldBootsMat,
+};
+
+// ---------- helpers ----------
+function removeWorldItem(item) {
+  itemGroup.remove(item.mesh);
+  const i = itemStates.indexOf(item);
+  if (i !== -1) itemStates.splice(i, 1);
+}
+
+function awardPoints(item) {
+  const base = POINT_BASE_MIN + Math.floor(rng() * (POINT_BASE_MAX - POINT_BASE_MIN + 1));
+  const award = base * ('rooms_maze_points'[item.type] ?? 1);
+
+  points = (typeof points === 'number' ? points : 0) + award;
+  try { localStorage.setItem(POINTS_STORAGE_KEY, String(points)); } catch { /* storage unavailable */ }
+
+  showPointsEarned(award);
+  updateInfoDisplays();
+  try { audios.play('sfx', 'notebookpickup'); } catch { /* audio not ready */ }
+}
+
+// ---------- pickup ----------
 function tryPickupItem() {
   if (!itemStates.length) return;
+
   raycaster.setFromCamera(mouseCenter, camera);
-  const availableMeshes = itemStates.map(i => i.mesh);
-  if (!availableMeshes.length) return;
-  const hits = raycaster.intersectObjects(availableMeshes, false);
-  if (!hits.length) return;
+  const hit = raycaster.intersectObjects(itemStates.map(i => i.mesh), false)[0];
+  if (!hit || hit.distance > INTERACT_REACH) return;
 
-  const hit = hits[0];
-  if (hit.distance > INTERACT_REACH) return;
-
-  const mesh = hit.object;
-  const item = itemStates.find(i => i.mesh === mesh);
+  const item = itemStates.find(i => i.mesh === hit.object);
   if (!item) return;
 
-  // If this is a points pickup, award points directly and do NOT put into inventory
-  if (item.type && item.type.startsWith('point_')) {
-    // base random between 55 and 75 inclusive
-    const base = Math.floor(rng() * (75 - 55 + 1)) + 55;
-    let multiplier = 1;
-    if (item.type === 'point_orange') multiplier = 1;
-    else if (item.type === 'point_green') multiplier = 2;
-    else if (item.type === 'point_pink') multiplier = 3;
-    else if (item.type === 'point_mega') multiplier = 7;
-
-    const award = base * multiplier;
-    // update persistent points and HUD animation
-    try {
-      const oldPoints = (typeof points === 'number' ? points : 0);
-      points = oldPoints + award;
-      localStorage.setItem('rooms_maze_points', String(points));
-      showPointsEarned(award);
-    } catch { }
-    updateInfoDisplays();
-
-    // play pickup sound and remove the world mesh
-    try { audios.play('sfx', 'notebookpickup') } catch { }
-
-    itemGroup.remove(item.mesh);
-    itemStates.splice(itemStates.indexOf(item), 1);
-    refreshInventoryHUD(); // keep HUD state correct
+  // Points pickups are consumed directly; they never touch the inventory
+  if (item.type?.startsWith('point_')) {
+    awardPoints(item);
+    removeWorldItem(item);
     return;
   }
 
-  // Existing logic for normal inventory items (unchanged)
   const newItem = { type: item.type };
 
-  // find next free slot
-  let freeIndex = inventory.findIndex(s => s === null);
-  if (freeIndex !== -1) {
-    inventory[freeIndex] = newItem;
-    // remove world item
-    itemGroup.remove(item.mesh);
-    itemStates.splice(itemStates.indexOf(item), 1);
-  } else {
-    // no free slot: replace item in currently selected slot
-    const current = inventory[selectedInvIndex];
-    if (!current) {
-      // shouldn't happen if no free slot, but just in case
-      inventory[selectedInvIndex] = newItem;
-      itemGroup.remove(item.mesh);
-      itemStates.splice(itemStates.indexOf(item), 1);
-    } else {
-      // swap: world item becomes the item we were holding
-      const oldType = current.type;
+  // Use a free slot if there is one, otherwise swap with the selected slot
+  const freeIndex = inventory.indexOf(null);
+  const slot = freeIndex !== -1 ? freeIndex : selectedInvIndex;
+  const held = inventory[slot];
+  inventory[slot] = newItem;
 
-      // update world item state and visual to match the dropped item
-      item.type = oldType;
-      item.mesh.userData.type = oldType;
-
-      if (oldType === 'blue_soda') item.mesh.material = blueSodaMat;
-      else if (oldType === 'purple_chocolate') item.mesh.material = purpleChocolateMat;
-      else if (oldType === 'walkie_talkie') item.mesh.material = walkieTalkieMat;
-      else if (oldType === 'wd40') item.mesh.material = wd40Mat;
-      else if (oldType === 'old_boots') item.mesh.material = oldBootsMat;
-
-      inventory[selectedInvIndex] = newItem;
-    }
-  }
+  if (held) {
+    // Swap: the world item becomes whatever the player was holding
+    item.type = held.type;
+    item.mesh.userData.type = held.type;
+    const mat = ITEM_MATERIALS[held.type];
+    if (mat) item.mesh.material = mat;
+  } else removeWorldItem(item);
 
   refreshInventoryHUD();
 }
@@ -4115,11 +3957,13 @@ function animate(time) {
           st.specialState.testBlindUntil = now + 10.0;
 
           // apply blindness: quickly set a dense fog + black background for player
-          scene.background = new THREE.Color(0x000000);
-          if (scene.fog) {
-            scene.fog.color.setHex(0x000000);
-            scene.fog.near = 0.1;
-            scene.fog.far = 0.6;
+          if (!modNoDarkness) {
+            scene.background = new THREE.Color(0x000000);
+            if (scene.fog) {
+              scene.fog.color.setHex(0x000000);
+              scene.fog.near = 0.1;
+              scene.fog.far = 0.6;
+            }
           }
 
           // schedule respawn after 10s: pick random hallway tile and place test there, visible again
@@ -4131,7 +3975,7 @@ function animate(time) {
               }
               state.mesh.visible = true;
               // remove blindness only if no other black-mode is active (simple approach)
-              if (!darkModeApplied && (!allNotebooksCollectedAt || clock.getElapsed() > state.specialState.testBlindUntil)) {
+              if (!modNoDarkness && !darkModeApplied && (!allNotebooksCollectedAt || clock.getElapsed() > state.specialState.testBlindUntil)) {
                 scene.background = new THREE.Color(0xffffff);
                 if (scene.fog) {
                   scene.fog.color.setHex(diffSettings[currentDifficulty].fog || 0xffffff);

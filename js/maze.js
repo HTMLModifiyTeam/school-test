@@ -1,4 +1,4 @@
-import { DIRS } from "./utils.js";
+import { DIRS, mulberry32 } from "./utils.js";
 
 /**
  * Room-and-corridor maze generator.
@@ -40,18 +40,6 @@ const TURN_COST = 2;      // discourages zig-zag corridors
 const RING_COST = 8;      // discourages hugging a room wall (except at the door)
 const PARALLEL_COST = 1;  // discourages new corridors running right beside old ones
 const NOISE = 0.5;        // random cost jitter so routes vary
-
-/** Small seedable PRNG (mulberry32). */
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 class MinHeap {
   constructor() { this.a = []; }

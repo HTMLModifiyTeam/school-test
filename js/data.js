@@ -17,13 +17,13 @@ export const IMG_CACHE = {
 
 export const AUDIO_CACHE = {
   music: [
-    { snd: 'chasing.wav', loop: true },
-    { snd: 'run.wav', loop: true, vol: 0.9 },
-    { snd: 'schoolhouse.wav', loop: true, vol: 0.9 },
+    { snd: 'chasing.mp3', loop: true },
+    { snd: 'run.mp3', loop: true, vol: 0.9 },
+    { snd: 'schoolhouse.mp3', loop: true, vol: 0.9 },
   ],
   jumpscares: [
-    { snd: 'jumpscare.wav' },
-    { snd: 'jumpscare2.wav' },
+    { snd: 'jumpscare.mp3' },
+    { snd: 'jumpscare2.mp3' },
   ],
   door: [
     { snd: 'close.mp3' },
@@ -36,7 +36,14 @@ export const AUDIO_CACHE = {
     { snd: 'notebookpickup.mp3' },
     { snd: 'soda.mp3', vol: 0.85 },
     { snd: 'spray.mp3' },
-    { snd: 'sweep.wav', loop: true },
+    { snd: 'sweep.mp3', loop: true },
     { snd: 'wind.mp3', loop: true }
   ]
 }
+
+export const POINT_MULTIPLIERS = {
+  point_orange: 1,
+  point_green: 2,
+  point_pink: 3,
+  point_mega: 7,
+};
